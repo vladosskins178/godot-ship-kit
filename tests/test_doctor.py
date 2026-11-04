@@ -159,3 +159,25 @@ def test_cli_exit_codes(example: Path, toolchain, flag: str) -> None:  # type: i
     toolchain()
     assert main(["doctor", str(example), flag]) == 0
     assert main(["doctor", str(example), flag, "--strict"]) == 1  # release keystore warning
+
+
+def test_plaintext_password_in_presets(example: Path, toolchain) -> None:  # type: ignore[no-untyped-def]
+    toolchain()
+    _edit(example / "export_presets.cfg", "preset.0.options", {"keystore/release_password": "oops-plain"})
+    subprocess.run(["git", "init", "-q", str(example)], check=True)
+    subprocess.run(["git", "-C", str(example), "add", "export_presets.cfg"], check=True)
+    findings = run_doctor(GodotProject.open(example))[0]
+    f = _by_check(findings)["git.preset_secrets"][0]
+    assert f.severity == Severity.ERROR and "oops-plain" not in f.detail + f.title
+
+
+def test_keystore_path_from_export_credentials(example: Path, toolchain) -> None:  # type: ignore[no-untyped-def]
+    toolchain()
+    ks = example.parent / "vault.keystore"
+    ks.write_bytes(b"x")
+    (example / ".godot").mkdir()
+    (example / ".godot" / "export_credentials.cfg").write_text(
+        f'[preset.0.options]\n\nkeystore/release="{ks}"\nkeystore/release_user="u"\nkeystore/release_password="p"\n'
+    )
+    f = _by_check(run_doctor(GodotProject.open(example))[0])["signing.release"][0]
+    assert f.severity == Severity.OK and "export_credentials" in f.detail

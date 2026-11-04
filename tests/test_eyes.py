@@ -88,9 +88,16 @@ def test_load_example_config(example: Path) -> None:
 
 
 def test_config_errors_and_defaults(example: Path) -> None:
-    (example / "gsk.toml").write_text('[[eyes.shot]]\nname="a"\nscene="res://x.tscn"\n[[eyes.shot]]\nname="a"\nscene="res://y.tscn"\n')
+    (example / "gsk.toml").write_text(
+        '[[eyes.shot]]\nname="a"\nscene="res://scenes/menu.tscn"\n[[eyes.shot]]\nname="a"\nscene="res://scenes/diorama.tscn"\n'
+    )
     with pytest.raises(EyesConfigError, match="unique"):
         load_config(GodotProject.open(example))
+    with pytest.raises(EyesConfigError, match="not found"):
+        load_config(GodotProject.open(example), scenes=["res://nope.tscn"])
+    with pytest.raises(EyesConfigError, match="not found"):
+        load_config(GodotProject.open(example), scenes=["nope/missing.tscn"])
+    assert load_config(GodotProject.open(example), scenes=["scenes/menu.tscn"]).shots[0].scene == "res://scenes/menu.tscn"
     (example / "gsk.toml").unlink()
     cfg = load_config(GodotProject.open(example))
     assert [s.scene for s in cfg.shots] == ["res://scenes/menu.tscn"]  # falls back to the main scene
@@ -185,3 +192,39 @@ def test_reports(tmp_path: Path, example: Path) -> None:
     assert "| menu | phone | match |" in md
     paths = write_reports(run)
     assert all(p.is_file() for p in paths.values())
+
+
+def test_config_paths_must_stay_inside_project(example: Path) -> None:
+    (example / "gsk.toml").write_text('[eyes]\noutput = "../../elsewhere"\n')
+    with pytest.raises(EyesConfigError, match="outside the project"):
+        load_config(GodotProject.open(example))
+
+
+def test_render_capture_script(tmp_path: Path) -> None:
+    from godot_ship_kit.eyes.runner import EyesError, gd_literal, render_capture_script
+
+    assert gd_literal({"a": [1, 2.5, True, None, 'q"uote']}) == '{"a": [1, 2.5, true, null, "q\\"uote"]}'
+    shots = [
+        Shot(
+            "menu",
+            "res://scenes/menu.tscn",
+            wait=1.5,
+            actions=[
+                {"tap": [0.5, 0.6]},
+                {"press": "ui_accept", "then_wait": 1},
+                {"wait": 0.2},
+                {"node": "Player", "call": "jump", "args": [2]},
+                {"node": "/root/Hud", "set": "visible", "value": False},
+            ],
+        )
+    ]
+    text = render_capture_script(720, 1600, tmp_path, 60, shots)
+    assert "const WIDTH: int = 720" in text and "const BUDGET_MS: int = 60000" in text
+    assert 'await _open_scene("menu", "res://scenes/menu.tscn", 1.5)' in text
+    assert "await _tap(0.5, 0.6, 0.3)" in text
+    assert 'await _press("ui_accept", 1.0)' in text
+    assert 'await _call_node("Player", "jump", [2])' in text
+    assert 'await _set_node("/root/Hud", "visible", false)' in text
+    assert "@@" not in text
+    with pytest.raises(EyesError):
+        render_capture_script(720, 1600, tmp_path, 60, [Shot("x", "res://x.tscn", actions=[{"jump": 1}])])

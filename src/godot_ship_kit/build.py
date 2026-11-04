@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -30,8 +31,8 @@ KNOWN_ERRORS: list[tuple[str, str]] = [
         "Enable Project Settings > Rendering > Textures > VRAM Compression > Import ETC2 ASTC.",
     ),
     (
-        r"keystore.*(not found|missing|invalid)|Could not find keystore|Release keystore incorrectly configured",
-        "Check GODOT_ANDROID_KEYSTORE_RELEASE_PATH / _USER / _PASSWORD.",
+        r"keystore.*(not found|missing|invalid)|Could not find (release |debug )?keystore|keystore incorrectly configured",
+        "Check GODOT_ANDROID_KEYSTORE_RELEASE_PATH / _USER / _PASSWORD, or use --debug for a test build.",
     ),
     (
         r"Invalid filename! Android App Bundle requires the \*\.aab extension",
@@ -78,12 +79,41 @@ def default_output(project: GodotProject, preset: Preset, release: bool) -> Path
     return project.root / "build" / f"{slug}-{version}-{'release' if release else 'debug'}.{fmt}"
 
 
-def signing_summary(release: bool) -> str:
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def clean_log(text: str) -> str:
+    """Strip terminal escapes and control characters, and mask signing values from the environment."""
+    text = ANSI.sub("", text)
+    for kind in ("RELEASE", "DEBUG"):
+        for part in ("PASSWORD", "USER"):
+            value = os.environ.get(f"GODOT_ANDROID_KEYSTORE_{kind}_{part}")
+            if value and len(value) >= 3:
+                text = text.replace(value, "<redacted>")
+    return text
+
+
+def release_keystore_source(project: GodotProject, preset: Preset) -> str | None:
+    """Where the release keystore path comes from, or None if nothing is configured."""
+    if os.environ.get("GODOT_ANDROID_KEYSTORE_RELEASE_PATH"):
+        return "environment"
+    if str(preset.opt("keystore/release", "") or "").strip():
+        return "preset"
+    creds = project.credentials.section(f"preset.{preset.index}.options")
+    if str(creds.get("keystore/release", "") or "").strip():
+        return "export credentials"
+    return None
+
+
+def signing_summary(release: bool, project: GodotProject | None = None, preset: Preset | None = None) -> str:
     kind = "RELEASE" if release else "DEBUG"
     have = [s for s in ("PATH", "USER", "PASSWORD") if os.environ.get(f"GODOT_ANDROID_KEYSTORE_{kind}_{s}")]
     if have:
         return f"{kind.lower()} keystore from environment ({', '.join(have)} set)"
-    return f"{kind.lower()} keystore from preset / editor settings"
+    if not release:
+        return "debug keystore from the preset or editor settings"
+    source = release_keystore_source(project, preset) if project and preset else None
+    return f"release keystore from the {source}" if source else "no release keystore configured"
 
 
 def find_hints(log_text: str) -> list[str]:
@@ -101,6 +131,7 @@ def export(
     output: Path,
     release: bool = True,
     timeout: int = 3600,
+    install_template: bool = False,
 ) -> BuildResult:
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +141,14 @@ def export(
             f"Preset '{preset.name}' exports {fmt.upper()} but the output path ends in {output.suffix or '(nothing)'}.",
             hints=[f"Use an .{fmt} path, or change gradle_build/export_format in the preset."],
         )
+    if release and preset.opt("package/signed", True) and not release_keystore_source(project, preset):
+        raise BuildError(
+            "No release keystore configured, so a release build cannot be signed.",
+            hints=[
+                "Set GODOT_ANDROID_KEYSTORE_RELEASE_PATH, _USER and _PASSWORD (see `gsk doctor`).",
+                "Or build a test APK signed with the debug key: gsk build --debug",
+            ],
+        )
     log_dir = project.root / ".gsk" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     gi = project.root / ".gsk" / ".gitignore"
@@ -117,20 +156,26 @@ def export(
         gi.write_text("*\n", encoding="utf-8")
     log = log_dir / f"build-{time.strftime('%Y%m%d-%H%M%S')}.log"
     flag = "--export-release" if release else "--export-debug"
-    cmd = [godot.path, "--headless", "--path", str(project.root), flag, preset.name, str(output)]
+    cmd = [godot.path, "--headless", "--path", str(project.root)]
+    if install_template:
+        cmd.append("--install-android-build-template")
+    cmd += [flag, preset.name, str(output)]
 
     before = output.stat().st_mtime if output.exists() else None
     start = time.time()
-    with log.open("w", encoding="utf-8") as fh:
-        fh.write("$ " + " ".join(cmd) + "\n\n")
-        fh.flush()
-        try:
-            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout, text=True)
-            code = proc.returncode
-        except subprocess.TimeoutExpired:
-            raise BuildError(f"Export timed out after {timeout}s", log) from None
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, text=True, errors="replace")
+        code, raw = proc.returncode, proc.stdout or ""
+    except subprocess.TimeoutExpired as exc:
+        code, raw = -1, (exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else exc.stdout or "")
+        raw += f"\n[gsk] export timed out after {timeout}s\n"
     elapsed = time.time() - start
-    text = log.read_text(encoding="utf-8", errors="replace")
+    text = clean_log(raw)
+    log.write_text("$ " + " ".join(cmd) + "\n\n" + text, encoding="utf-8")
+    with contextlib.suppress(OSError):
+        log.chmod(0o600)
+    if code == -1:
+        raise BuildError(f"Export timed out after {timeout}s", log)
     produced = output.exists() and (before is None or output.stat().st_mtime > before)
     # Godot sometimes exits 0 after a failed export, so the output file is the real signal.
     if code != 0 or not produced:

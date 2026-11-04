@@ -3,8 +3,8 @@
 [eyes]
 devices = ["phone-small"]          # 720x1600; add "phone", "tablet", ... as needed
 references = "tests/eyes"      # committed golden screenshots (gsk adds a .gdignore)
-threshold = 0.985              # minimum similarity (SSIM) to count as a match
-max_changed = 0.003            # at most 0.3% of pixels may change
+threshold = 0.99               # minimum similarity (SSIM) to count as a match
+max_changed = 0.0005           # at most 0.05% of pixels may change
 
 [[eyes.shot]]
 name = "menu"

@@ -20,7 +20,7 @@ gsk eyes [PROJECT] [--scene SCENE ...] [--device DEVICE ...] [--update]
 | `--update` | Save the captures as references instead of comparing. |
 | `--rendering-method` | Defaults to the project's **mobile** renderer (`rendering/renderer/rendering_method.mobile`). |
 | `--gpu` | Allow a hardware GPU. By default software rendering is forced (`LIBGL_ALWAYS_SOFTWARE=1`) so results do not depend on the machine. |
-| `--display` | `auto` uses `$DISPLAY` when an X server answers there and falls back to `xvfb-run`; `xvfb` always uses a virtual display. |
+| `--display` | `auto` uses `$DISPLAY` when an X server answers there and falls back to `xvfb-run`; `xvfb` always uses a virtual display; `native` always uses `$DISPLAY` / Wayland. macOS and Windows use their own display unless `xvfb` is asked for. |
 
 Exit codes: `0` everything matched (or was saved), `1` a shot changed or failed,
 `2` usage error (no Godot, no xvfb, bad config).
@@ -49,9 +49,10 @@ Without a `devices` setting, portrait projects use `phone` and landscape ones
 devices = ["phone", "tablet"]
 references = "tests/eyes"        # relative to the project root
 output = ".gsk/eyes"             # report folder
-threshold = 0.985                # minimum similarity (0..1)
-max_changed = 0.003              # maximum share of changed pixels (0..1)
+threshold = 0.99                 # minimum similarity (0..1)
+max_changed = 0.0005             # maximum share of changed pixels (0..1); 0.0005 is about 1300 px on a 1080x2400 screen
 tolerance = 24                   # per-channel difference (0..255) that counts as "changed"
+region_pixels = 40               # one connected change this big fails the shot (0 = off)
 wait = 1.0                       # default seconds to wait after a scene loads
 boot_seconds = 120               # extra time budget for engine start and shader compiles
 
@@ -62,6 +63,7 @@ wait = 1.5
 devices = ["phone"]              # optional: only on these devices
 threshold = 0.97                 # optional per-shot override
 max_changed = 0.01               # optional per-shot override
+region_pixels = 200              # optional per-shot override
 actions = [
   { tap = [0.5, 0.62] },                          # click at 50% x, 62% y of the screen
   { press = "ui_accept" },                        # press and release an input action
@@ -104,8 +106,10 @@ tests/eyes/
    `tolerance` count as changed. `max_changed` is the allowed share.
 2. **Similarity**: SSIM on luminance, computed on a copy downscaled about four times, with
    8x8 windows. Downscaling makes it about shapes and layout rather than single pixels.
-3. A shot **matches** when similarity is at least `threshold` and the changed share is at
-   most `max_changed`. A size mismatch never matches.
+3. A shot **matches** when similarity is at least `threshold`, the changed share is at
+   most `max_changed`, and no single changed region holds `region_pixels` or more changed
+   pixels. The last rule catches small, local edits (a digit in a price, a missing icon)
+   that barely move the frame-wide numbers. A size mismatch never matches.
 4. Changed pixels are grouped on a 24 px grid into regions; the largest ones are boxed in
    the diff image and saved as crops.
 
@@ -132,5 +136,17 @@ small method that freezes the state you want to check and call it from an action
 (`{ node = ".", call = "freeze_for_capture" }`), seed your RNG, or loosen `threshold` and
 `max_changed` for that shot.
 
-References made on one Mesa version can differ by a few antialiased pixels on another.
-Generate references on the same image your CI uses, or keep the default tolerance.
+References are tied to the Godot version: text rasterisation changes between releases, so
+an upgrade shows small differences on every screen with text. Regenerate references after
+upgrading (look at a few crops first). Different Mesa versions can also differ by a few
+antialiased pixels; generate references on the same image your CI uses.
+
+## How the capture works
+
+For each device, gsk writes a small GDScript (`.gsk/eyes/<device>/capture.gd`) with the
+shot list compiled in as typed code, and starts Godot with
+`godot --path <project> --resolution WxH -s capture.gd`, under `xvfb-run` when there is no
+display, with `LIBGL_ALWAYS_SOFTWARE=1` unless `--gpu` is given. Because the shot data is
+code rather than JSON parsed at runtime, the script also loads in projects whose warning
+settings turn untyped or unsafe GDScript into errors. It runs your autoloads and scene
+scripts like the game does, so only run it on projects you trust.

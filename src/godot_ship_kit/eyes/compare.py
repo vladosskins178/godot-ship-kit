@@ -20,6 +20,7 @@ class Diff:
     max_delta: int
     regions: list[tuple[float, float, float, float]] = field(default_factory=list)  # x, y, w, h fractions
     size_mismatch: bool = False
+    largest_region_px: int = 0  # changed pixels inside the biggest region
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -28,6 +29,7 @@ class Diff:
             "max_delta": self.max_delta,
             "regions": [[round(v, 4) for v in r] for r in self.regions],
             "size_mismatch": self.size_mismatch,
+            "largest_region_px": self.largest_region_px,
         }
 
 
@@ -71,7 +73,7 @@ def _downscale(rgb: np.ndarray, long_side: int = 1024) -> np.ndarray:
 
 
 def _regions(mask: np.ndarray, cell: int = 24, max_regions: int = 6) -> list[tuple[int, int, int, int]]:
-    """Group changed pixels into boxes on a coarse grid (pixel coordinates)."""
+    """Group changed pixels into boxes on a coarse grid (pixel coordinates), largest first."""
     h, w = mask.shape
     gh, gw = (h + cell - 1) // cell, (w + cell - 1) // cell
     padded = np.zeros((gh * cell, gw * cell), dtype=bool)
@@ -116,9 +118,10 @@ def compare(reference: Path, current: Path, diff_out: Path | None = None, tolera
     h, w = mask.shape
     px_regions = _regions(mask) if changed > 0 else []
     regions = [(x / w, y / h, bw / w, bh / h) for x, y, bw, bh in px_regions]
+    largest = max((int(mask[y : y + bh, x : x + bw].sum()) for x, y, bw, bh in px_regions), default=0)
     if diff_out is not None:
         render_diff(cur, delta, mask, px_regions, diff_out)
-    return Diff(sim, changed, int(delta.max()), regions)
+    return Diff(sim, changed, int(delta.max()), regions, largest_region_px=largest)
 
 
 def render_diff(cur: np.ndarray, delta: np.ndarray, mask: np.ndarray, boxes: list[tuple[int, int, int, int]], out: Path) -> None:
@@ -173,7 +176,7 @@ def crop(path: Path, rect: tuple[float, float, float, float], out: Path, pad: fl
     return out
 
 
-def side_by_side(left: Path, right: Path, rect: tuple[float, float, float, float], out: Path, pad: float = 0.02) -> Path:
+def side_by_side(left: Path, right: Path, rect: tuple[float, float, float, float], out: Path, pad: float = 0.05) -> Path:
     """Reference crop | current crop, for zooming into one changed region."""
     tmp_l, tmp_r = out.with_suffix(".l.png"), out.with_suffix(".r.png")
     crop(left, rect, tmp_l, pad)

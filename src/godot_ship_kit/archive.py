@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import struct
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -121,13 +123,35 @@ def inspect(
     else:
         rep.findings.append(F("archive.arm64", S.OK, "Contains arm64-v8a engine library"))
 
-    mb = rep.size / 1_048_576
+    # For a bundle, Play's limits apply per module and per asset pack, not to the whole file
+    # (which also carries every ABI). Recent Godot versions put the game's assets in an
+    # install-time asset pack. Compressed entry sizes are a close proxy for download size.
+    modules: dict[str, int] = {}
+    if kind == "aab":
+        for i in infos:
+            top = i.filename.split("/", 1)[0]
+            if "/" in i.filename and top not in ("BUNDLE-METADATA", "META-INF"):
+                modules[top] = modules.get(top, 0) + i.compress_size
+        rep.manifest["modules"] = dict(sorted(modules.items()))
+        for pack, size in modules.items():
+            if pack != "base" and size / 1_048_576 > playreq.AAB_ASSET_PACK_LIMIT_MB:
+                rep.findings.append(
+                    F(
+                        "archive.size",
+                        S.ERROR,
+                        f"Asset pack '{pack}' is {human_bytes(size)}; Play's limit per pack is 1.5 GB",
+                        docs=playreq.SIZE_LIMITS_URL,
+                    )
+                )
+    measured = modules.get("base", 0) if kind == "aab" else rep.size
+    label = "Base module" if kind == "aab" else kind.upper()
+    mb = measured / 1_048_576
     if kind == "aab" and mb > playreq.AAB_BASE_MODULE_LIMIT_MB:
         rep.findings.append(
             F(
                 "archive.size",
                 S.ERROR,
-                f"AAB is {human_bytes(rep.size)}; Play's base module limit is {playreq.AAB_BASE_MODULE_LIMIT_MB} MB",
+                f"Base module is {human_bytes(measured)}; Play's limit is {playreq.AAB_BASE_MODULE_LIMIT_MB} MB",
                 fix="Run `gsk slim` or move content into Play Asset Delivery packs.",
                 docs=playreq.SIZE_LIMITS_URL,
             )
@@ -137,15 +161,29 @@ def inspect(
             F(
                 "archive.size",
                 S.WARN,
-                f"{kind.upper()} is {human_bytes(rep.size)}",
+                f"{label} is {human_bytes(measured)}",
                 f"Above {playreq.MOBILE_DATA_WARNING_MB} MB, Play warns users on mobile data before downloading.",
                 "Run `gsk slim`.",
                 playreq.SIZE_LIMITS_URL,
             )
         )
     else:
-        rep.findings.append(F("archive.size", S.OK, f"{kind.upper()} size {human_bytes(rep.size)}"))
+        rep.findings.append(F("archive.size", S.OK, f"{label} size {human_bytes(measured)}"))
 
+    _check_page_size(rep, path, infos)
+    stored = [i for i in infos if i.filename.endswith(".so") and i.compress_type == zipfile.ZIP_STORED]
+    stored_bytes = sum(i.file_size for i in stored)
+    if kind == "apk" and stored_bytes > 20 * 1_048_576:
+        rep.findings.append(
+            F(
+                "archive.native_storage",
+                S.INFO,
+                f"Native libraries are stored uncompressed ({human_bytes(stored_bytes)})",
+                "Android can then load them in place, and Play compresses the download anyway. "
+                "Only APKs you hand out directly pay the full size.",
+                "For directly shared APKs, set gradle_build/compress_native_libraries=true in the preset.",
+            )
+        )
     if kind == "apk":
         _verify_apk(rep, toolchain, expect_release)
     else:
@@ -153,21 +191,86 @@ def inspect(
     return rep
 
 
-def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str] | None:
+def elf_load_alignment(head: bytes) -> int | None:
+    """Smallest p_align of the PT_LOAD segments in an ELF header blob, or None."""
+    if len(head) < 64 or head[:4] != b"\x7fELF":
+        return None
+    is64 = head[4] == 2
+    end = "<" if head[5] == 1 else ">"
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if is64:
+            phoff = struct.unpack_from(end + "Q", head, 0x20)[0]
+            phentsize, phnum = struct.unpack_from(end + "HH", head, 0x36)
+        else:
+            phoff = struct.unpack_from(end + "I", head, 0x1C)[0]
+            phentsize, phnum = struct.unpack_from(end + "HH", head, 0x2A)
+        aligns = []
+        for i in range(phnum):
+            off = phoff + i * phentsize
+            p_type = struct.unpack_from(end + "I", head, off)[0]
+            if p_type != 1:  # PT_LOAD
+                continue
+            p_align = struct.unpack_from(end + ("Q" if is64 else "I"), head, off + (0x30 if is64 else 0x1C))[0]
+            aligns.append(p_align)
+    except struct.error:
+        return None
+    return min(aligns) if aligns else None
+
+
+def _check_page_size(rep: ArchiveReport, path: Path, infos: list[zipfile.ZipInfo]) -> None:
+    """16 KB page support means every 64-bit .so has LOAD segments aligned to 16 KB or more."""
+    libs = [i for i in infos if re.search(r"(^|/)lib/(arm64-v8a|x86_64)/[^/]+\.so$", i.filename)]
+    if not libs:
+        return
+    bad: list[str] = []
+    with zipfile.ZipFile(path) as zf:
+        for info in libs:
+            with zf.open(info) as fh:
+                align = elf_load_alignment(fh.read(64 * 1024))
+            if align is not None and align < 0x4000:
+                bad.append(f"{info.filename} (aligned to {align // 1024} KB)")
+    if bad:
+        rep.findings.append(
+            F(
+                "archive.page_size",
+                S.WARN,
+                f"{len(bad)} native librar{'y is' if len(bad) == 1 else 'ies are'} not built for 16 KB pages",
+                "\n".join(bad[:6])
+                + f"\nPlay requires 16 KB page support for apps targeting Android 15+ (updates blocked from {playreq.PAGE_16K_DEADLINE}).",
+                "Use Godot 4.5+ export templates, and update plugins that ship their own .so files.",
+                playreq.PAGE_16K_URL,
+            )
+        )
+    else:
+        rep.findings.append(F("archive.page_size", S.OK, f"{len(libs)} 64-bit native libraries support 16 KB pages"))
+
+
+def _run(cmd: list[str], timeout: int = 300, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _java_env(tc: AndroidToolchain | None) -> dict[str, str] | None:
+    """apksigner is a Java program; point it at the configured JDK when PATH has none."""
+    if not tc or not tc.java():
+        return None
+    env = dict(os.environ)
+    assert tc.jdk is not None
+    env["JAVA_HOME"] = str(tc.jdk)
+    env["PATH"] = str(tc.jdk / "bin") + os.pathsep + env.get("PATH", "")
+    return env
 
 
 def _verify_apk(rep: ArchiveReport, tc: AndroidToolchain | None, expect_release: bool | None) -> None:
     apksigner = tc.latest_build_tool("apksigner") if tc else (Path(p) if (p := shutil.which("apksigner")) else None)
     zipalign = tc.latest_build_tool("zipalign") if tc else (Path(p) if (p := shutil.which("zipalign")) else None)
     aapt2 = tc.latest_build_tool("aapt2") if tc else (Path(p) if (p := shutil.which("aapt2")) else None)
-    path = str(rep.path)
+    path = str(rep.path.resolve())  # absolute, so a name starting with "-" is never read as an option
 
     if apksigner:
-        res = _run([str(apksigner), "verify", "--print-certs", "-v", path])
+        res = _run([str(apksigner), "verify", "--print-certs", "-v", path], env=_java_env(tc))
         if res and res.returncode == 0:
             subject = re.search(r"certificate DN: (.+)", res.stdout)
             digest = re.search(r"certificate SHA-256 digest: ([0-9a-f]+)", res.stdout)
@@ -198,22 +301,22 @@ def _verify_apk(rep: ArchiveReport, tc: AndroidToolchain | None, expect_release:
         )
 
     if zipalign:
-        res = _run([str(zipalign), "-c", "-P", "16", "-v", "4", path])
+        # -P 16 (16 KB alignment for uncompressed .so entries) exists from build-tools 35.
+        new_enough = re.match(r"(\d+)", zipalign.parent.name) and int(zipalign.parent.name.split(".")[0]) >= 35
+        res = _run([str(zipalign), "-c", *(["-P", "16"] if new_enough else []), "-v", "4", path])
         if res is None:
             rep.findings.append(F("archive.align", S.INFO, "zipalign did not run"))
         elif res.returncode == 0:
-            rep.findings.append(F("archive.align", S.OK, "zipalign OK, including 16 KB page alignment"))
+            rep.findings.append(F("archive.align", S.OK, "zipalign check passed" + (" (with -P 16)" if new_enough else "")))
         else:
-            unaligned = [ln for ln in res.stdout.splitlines() if "BAD" in ln][:5]
+            unaligned = [ln.strip() for ln in res.stdout.splitlines() if "BAD" in ln][:5]
             rep.findings.append(
                 F(
                     "archive.align",
                     S.WARN,
-                    "Native libraries are not 16 KB page aligned",
-                    "\n".join(unaligned)
-                    + "\nPlay requires 16 KB page support for apps targeting Android 15+ "
-                    + f"(release blocker from {playreq.PAGE_16K_DEADLINE}).",
-                    "Use Godot 4.5+ templates (built with NDK r28+). Plugins with old .so files need updating too.",
+                    "zipalign check failed",
+                    "\n".join(unaligned) or (res.stderr or res.stdout).strip()[-400:],
+                    "Godot normally aligns its exports; if a tool re-packed the APK, run zipalign -P 16 -f 4 on it.",
                     playreq.PAGE_16K_URL,
                 )
             )
@@ -261,6 +364,10 @@ def _target_finding(rep: ArchiveReport) -> None:
 
 
 def _bundletool() -> list[str] | None:
+    """``$BUNDLETOOL`` (a jar or an executable), ``bundletool`` on PATH, or a jar in common places."""
+    env = os.environ.get("BUNDLETOOL")
+    if env and Path(env).is_file():
+        return ["java", "-jar", env] if env.endswith(".jar") else [env]
     exe = shutil.which("bundletool")
     if exe:
         return [exe]
@@ -278,7 +385,7 @@ def _verify_aab(rep: ArchiveReport, tc: AndroidToolchain | None) -> None:
                 "archive.bundletool",
                 S.INFO,
                 "bundletool not found; AAB structure not validated",
-                fix="Install bundletool (https://github.com/google/bundletool/releases) or put bundletool.jar in your home folder.",
+                fix="Install bundletool (https://github.com/google/bundletool/releases) and set BUNDLETOOL=/path/to/bundletool.jar.",
             )
         )
         return
@@ -292,23 +399,20 @@ def _verify_aab(rep: ArchiveReport, tc: AndroidToolchain | None) -> None:
     if res and res.returncode == 0:
         m = re.search(r'package="([^"]+)"', res.stdout)
         vc = re.search(r'android:versionCode="(\d+)"', res.stdout)
+        vn = re.search(r'android:versionName="([^"]*)"', res.stdout)
         t = re.search(r'android:targetSdkVersion="(\d+)"', res.stdout)
+        mn = re.search(r'android:minSdkVersion="(\d+)"', res.stdout)
+        perms = re.findall(r'<uses-permission[^>]*android:name="([^"]+)"', res.stdout)
         if m:
             rep.manifest["package"] = m.group(1)
         if vc:
             rep.manifest["version_code"] = int(vc.group(1))
+        if vn:
+            rep.manifest["version_name"] = vn.group(1)
         if t:
             rep.manifest["target_sdk"] = int(t.group(1))
+        if mn:
+            rep.manifest["min_sdk"] = int(mn.group(1))
+        if perms:
+            rep.manifest["permissions"] = sorted({p.removeprefix("android.permission.") for p in perms})
         _target_finding(rep)
-    res = _run([*bt, "dump", "config", f"--bundle={rep.path}"])
-    if res and res.returncode == 0 and "PAGE_ALIGNMENT_16K" not in res.stdout:
-        rep.findings.append(
-            F(
-                "archive.align",
-                S.WARN,
-                "AAB does not declare 16 KB page alignment",
-                f"Release blocker from {playreq.PAGE_16K_DEADLINE} for apps targeting Android 15+.",
-                "Build with Godot 4.5+ templates.",
-                playreq.PAGE_16K_URL,
-            )
-        )

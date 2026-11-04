@@ -124,3 +124,72 @@ def test_cli_slim_report_and_apply(example: Path, capsys) -> None:  # type: igno
     assert _params(example / "art" / "backdrop.jpg.import")["compress/mode"] == 1
     assert main(["slim", str(example), "--undo"]) == 0
     assert _params(example / "art" / "backdrop.jpg.import")["compress/mode"] == 0
+
+
+def test_name_only_3d_guess_is_review_tier(example: Path) -> None:
+    src = example / "art" / "wood_albedo.jpg"
+    src.write_bytes((example / "art" / "ground_albedo.jpg").read_bytes())
+    (example / "art" / "wood_albedo.jpg.import").write_text(
+        (example / "art" / "ground_albedo.jpg.import").read_text().replace("ground_albedo.jpg", "wood_albedo.jpg"),
+        encoding="utf-8",
+    )
+    add_fake_imports(example, {"wood_albedo.jpg": 3_000_000, "ground_albedo.jpg": 3_000_000})
+    rep = slim.analyze(GodotProject.open(example))
+    risks = {p.entry.source_path.name: p.risk for p in rep.proposals if p.rule == "vram-3d"}
+    assert risks == {"ground_albedo.jpg": slim.SAFE, "wood_albedo.jpg": slim.REVIEW}
+
+
+def test_material_detection_is_per_block() -> None:
+    from godot_ship_kit.project import _material_textures
+
+    tscn = (
+        "[gd_scene format=3]\n\n"
+        '[ext_resource type="Texture2D" path="res://ui/panel.png" id="1_ui"]\n'
+        '[ext_resource type="Texture2D" uid="uid://x" path="res://models/rock.png" id="2_rock"]\n\n'
+        '[sub_resource type="StandardMaterial3D" id="m"]\nalbedo_texture = ExtResource("2_rock")\n\n'
+        '[node name="Ui" type="TextureRect"]\ntexture = ExtResource("1_ui")\n'
+    )
+    assert _material_textures(tscn) == {"res://models/rock.png"}
+
+
+def test_undo_refuses_paths_outside_the_project(example: Path) -> None:
+    import pytest
+
+    victim = example.parent / "victim.txt"
+    victim.write_text("keep me")
+    backup = example / ".gsk" / "backups" / "29991231-000000"
+    backup.mkdir(parents=True)
+    (backup / "evil.import").write_text("x")
+    (backup / "manifest.json").write_text(json.dumps({"files": [{"file": "../victim.txt"}]}))
+    with pytest.raises(ValueError, match="Refusing"):
+        slim.undo(GodotProject.open(example))
+    assert victim.read_text() == "keep me"
+
+
+def test_symlinked_and_special_import_files_are_ignored(example: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.import"
+    outside.write_text((example / "art" / "backdrop.jpg.import").read_text())
+    (example / "art" / "linked.png.import").symlink_to(outside)
+    (example / "art" / "zero.import").symlink_to("/dev/zero")
+    names = {e.import_path.name for e in GodotProject.open(example).imports}
+    assert "linked.png.import" not in names and "zero.import" not in names
+
+
+def test_glb_with_bad_accessor_index(tmp_path: Path) -> None:
+    doc = {"accessors": [], "meshes": [{"primitives": [{"indices": 99}]}]}
+    js = json.dumps(doc).encode()
+    js += b" " * (-len(js) % 4)
+    body = struct.pack("<I4s", len(js), b"JSON") + js
+    p = tmp_path / "bad.glb"
+    p.write_bytes(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+    assert slim.glb_triangles(p) is None
+
+
+def test_apply_keeps_crlf_line_endings(example: Path) -> None:
+    imp = example / "art" / "ground_albedo.jpg.import"
+    imp.write_bytes(imp.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    add_fake_imports(example, {"ground_albedo.jpg": 3_000_000})
+    project = GodotProject.open(example)
+    slim.apply(project, [p for p in slim.analyze(project).proposals if p.risk == slim.SAFE])
+    data = imp.read_bytes()
+    assert b"compress/mode=2\r\n" in data and data.count(b"\r\n") == data.count(b"\n")

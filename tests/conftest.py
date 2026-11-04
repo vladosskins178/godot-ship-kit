@@ -27,6 +27,7 @@ for a in "$@"; do
   prev="$a"
 done
 echo "fake godot export to $out"
+if [ -n "$FAKE_GODOT_ECHO" ]; then printf '\033[1;31mERROR:\033[0m keystore pass:%s\n' "$FAKE_GODOT_ECHO"; fi
 if [ -n "$FAKE_GODOT_FAIL" ]; then
   echo "ERROR: No export template found at the expected path"
   exit 1

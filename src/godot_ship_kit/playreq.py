@@ -20,6 +20,7 @@ PAGE_16K_URL = "https://developer.android.com/guide/practices/page-sizes"
 
 # App Bundle size limits (compressed download size).
 AAB_BASE_MODULE_LIMIT_MB = 500
+AAB_ASSET_PACK_LIMIT_MB = 1536  # each asset pack, 1.5 GB
 APK_LEGACY_UPLOAD_LIMIT_MB = 100
 MOBILE_DATA_WARNING_MB = 200
 SIZE_LIMITS_URL = "https://support.google.com/googleplay/android-developer/answer/9859372"

@@ -43,6 +43,7 @@ def to_json(run: EyesRun) -> dict[str, object]:
         "thresholds": {
             "similarity": run.config.threshold,
             "max_changed": run.config.max_changed,
+            "region_pixels": run.config.region_pixels,
             "tolerance": run.config.tolerance,
         },
         "results": [r.to_dict(base) for r in run.results],

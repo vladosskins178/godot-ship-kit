@@ -53,4 +53,4 @@ pytest -m godot             # end-to-end; needs $GODOT and xvfb
 1. Update `version` in `pyproject.toml`, `src/godot_ship_kit/__init__.py` and
    `.claude-plugin/plugin.json`.
 2. Move the "Unreleased" notes in `CHANGELOG.md` under the new version.
-3. Tag `vX.Y.Z` and push the tag.
+3. Tag `vX.Y.Z`, move the major tag (`v0`) to it for the GitHub Action, and push both.

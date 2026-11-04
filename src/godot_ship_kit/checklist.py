@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from . import playreq
+from .build import preset_format
 from .project import GodotProject
 
 
@@ -45,7 +46,7 @@ def build_checklist(project: GodotProject) -> str:
     perms = sorted(k.split("/", 1)[1] for k, v in (preset.options.items() if preset else []) if k.startswith("permissions/") and v is True)
     det = _detect(project)
     sensitive = [p for p in perms if p in playreq.SENSITIVE_PERMISSIONS]
-    fmt = "AAB" if preset and opt("gradle_build/export_format", 0) == 1 else "APK"
+    fmt = preset_format(preset).upper() if preset else "APK"
 
     def box(text: str) -> str:
         return f"- [ ] {text}"

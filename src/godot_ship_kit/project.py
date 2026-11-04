@@ -200,7 +200,7 @@ class GodotProject:
     @property
     def imports(self) -> list[ImportEntry]:
         if self._imports is None:
-            self._imports = [e for e in (self._read_import(p) for p in self.walk() if p.suffix == ".import") if e]
+            self._imports = [e for e in (self._read_import(p) for p in self.walk() if p.suffix == ".import" and _regular_file(p)) if e]
         return self._imports
 
     def reload_imports(self) -> None:
@@ -234,9 +234,49 @@ class GodotProject:
         return entry
 
     # ------------------------------------------------------------ references
+    def resolve_uid(self, uid: str) -> str | None:
+        """``uid://...`` to a ``res://`` path, via scene headers, ``.uid`` files and ``.import`` files."""
+        for e in self.imports:
+            if str(e.remap.get("uid", "")) == uid:
+                return e.res_path
+        needle = f'uid="{uid}"'
+        for path in self.walk():
+            if path.suffix in (".tscn", ".tres"):
+                try:
+                    with path.open(encoding="utf-8", errors="replace") as fh:
+                        if needle in fh.readline():
+                            return self.path_to_res(path)
+                except OSError:
+                    continue
+            elif path.suffix == ".uid":
+                try:
+                    if path.read_text(encoding="utf-8").strip() == uid:
+                        return self.path_to_res(path.with_suffix(""))
+                except OSError:
+                    continue
+        return None
+
+    @property
+    def main_scene_res(self) -> str | None:
+        main = self.main_scene
+        if main and main.startswith("uid://"):
+            return self.resolve_uid(main) or main
+        return main
+
     @cached_property
     def reference_index(self) -> ReferenceIndex:
         return ReferenceIndex.build(self)
+
+
+MAX_IMPORT_FILE = 16 * 1024 * 1024
+
+
+def _regular_file(path: Path) -> bool:
+    """A real file of sane size (not a symlink, device or FIFO)."""
+    try:
+        return not path.is_symlink() and path.is_file() and path.stat().st_size <= MAX_IMPORT_FILE
+    except OSError:
+        return False
 
 
 def _size(path: Path) -> int:
@@ -291,10 +331,9 @@ class ReferenceIndex:
             literals |= found
             if path.suffix in (".gd", ".cs", ".json"):
                 names |= set(re.findall(r"[\w\-]+\.\w{2,5}", text))
+            uids |= set(_UID_LITERAL.findall(text))
             if path.suffix in (".tscn", ".tres"):
-                uids |= set(_UID_LITERAL.findall(text))
-                if re.search(r'type="(StandardMaterial3D|ORMMaterial3D|ShaderMaterial)"', text):
-                    tex3d |= {r for r in found if r.lower().endswith(_IMAGE_EXT)}
+                tex3d |= _material_textures(text)
         prefixes: set[str] = set()
         for lit in literals:
             cut = re.split(r"[%{$]", lit, maxsplit=1)[0]
@@ -311,6 +350,37 @@ class ReferenceIndex:
         if any(res_path.startswith(p) for p in self.prefixes):
             return True
         return any(len(lit) > 8 and res_path.startswith(lit) and lit != res_path for lit in self.literals)
+
+
+_EXT_RESOURCE = re.compile(r'^\[ext_resource\b[^\]]*?\bpath="([^"]+)"[^\]]*?\bid="([^"]+)"', re.M)
+_EXT_RESOURCE_ID_FIRST = re.compile(r'^\[ext_resource\b[^\]]*?\bid="([^"]+)"[^\]]*?\bpath="([^"]+)"', re.M)
+_MATERIAL_3D = ("StandardMaterial3D", "ORMMaterial3D", "Sprite3D", "Decal", "FogMaterial")
+
+
+def _material_textures(text: str) -> set[str]:
+    """Textures referenced from 3D materials, Sprite3D or Decal blocks.
+
+    Works for scenes (``[sub_resource type=...]`` / ``[node type=...]`` blocks) and for
+    standalone ``.tres`` materials, whose properties sit under ``[resource]`` and take
+    their type from the ``[gd_resource]`` header.
+    """
+    ids = {i: p for p, i in _EXT_RESOURCE.findall(text)} | dict(_EXT_RESOURCE_ID_FIRST.findall(text))
+    out: set[str] = set()
+    in_material = False
+    file_type = ""
+    for line in text.splitlines():
+        if line.startswith("["):
+            m = re.search(r'\btype="([^"]+)"', line)
+            if line.startswith("[gd_resource") and m:
+                file_type = m.group(1)
+            in_material = (m is not None and m.group(1) in _MATERIAL_3D) or (line.startswith("[resource]") and file_type in _MATERIAL_3D)
+            continue
+        if in_material:
+            for ref in re.findall(r'ExtResource\("([^"]+)"\)', line):
+                if ref in ids and ids[ref].lower().endswith(_IMAGE_EXT):
+                    out.add(ids[ref])
+            out |= {r for r in _RES_LITERAL.findall(line) if r.lower().endswith(_IMAGE_EXT)}
+    return out
 
 
 _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".tga", ".bmp", ".exr", ".hdr", ".svg", ".ktx", ".dds")

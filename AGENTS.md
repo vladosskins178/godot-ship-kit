@@ -13,7 +13,11 @@ append it to the game's own `AGENTS.md` with `gsk skill print >> AGENTS.md`).
   Keep edits minimal so `.import` files round-trip byte for byte.
 - `src/godot_ship_kit/playreq.py` holds every Google Play number with its source URL and
   the date it was checked. Update the date when you change a number.
-- `src/godot_ship_kit/eyes/capture.gd` runs inside Godot. It must work on Godot 4.2+.
+- `src/godot_ship_kit/eyes/capture.gd` is a template: `eyes/runner.py` fills in the shot
+  list as typed GDScript. It must parse on Godot 4.2+ and under strict warning settings
+  (`tests/test_godot_e2e.py` checks the latter).
+- `src/godot_ship_kit/mcp.py` is a dependency-free MCP server (`gsk mcp`) over the CLI.
+- `action.yml` makes the repository a composite GitHub Action; CI uses it via `uses: ./`.
 - `examples/hello-ship/` is a small Godot 4.6 project used by tests, CI and the README.
   Its golden screenshots live in `examples/hello-ship/tests/eyes/`.
 

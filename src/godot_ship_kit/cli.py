@@ -26,6 +26,19 @@ def _open_project(path: str) -> GodotProject:
     return GodotProject.open(path)
 
 
+def _fail(message: str, code: int = EXIT_USAGE) -> int:
+    """Errors go to stderr with a ``gsk:`` prefix so --json output on stdout stays clean."""
+    sys.stderr.write(f"gsk: {message}\n")
+    return code
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+NO_GODOT = "Godot not found. Set GODOT=/path/to/godot or pass --godot."
+
+
 # ---------------------------------------------------------------- doctor
 
 
@@ -55,12 +68,19 @@ def cmd_slim(args: argparse.Namespace) -> int:
     out = _out()
 
     if args.undo is not None:
-        restored = slim.undo(project, args.undo or None)
+        try:
+            restored = slim.undo(project, args.undo or None)
+        except ValueError as exc:
+            return _fail(str(exc), EXIT_FAIL)
         if not restored:
-            out.write("Nothing to undo: no gsk slim backups found.\n")
-            return EXIT_FAIL
-        out.write(f"Restored .import files from {restored.name}.\n")
-        return _maybe_reimport(project, args, out)
+            return _fail("nothing to undo: no gsk slim backups found.", EXIT_FAIL)
+        code, info = _maybe_reimport(project, args)
+        if args.json:
+            dump_json({"restored": restored.name, **info})
+        else:
+            out.write(f"Restored .import files from {restored.name}.\n")
+            _print_reimport(info, out)
+        return code
 
     report = slim.analyze(project, max_3d=args.max_3d, max_2d=args.max_2d, top=args.top)
     chosen = [p for p in report.proposals if p.risk == slim.SAFE or args.aggressive]
@@ -84,11 +104,14 @@ def cmd_slim(args: argparse.Namespace) -> int:
         out.write("\n" + style.bold("  Import changes") + "\n")
         if not report.proposals:
             out.write("    Nothing to change. Import settings already look lean.\n")
-        for rule, (title, why) in slim.RULES.items():
-            group = sorted((p for p in report.proposals if p.rule == rule), key=lambda p: -p.saving)
+        groups = [(rule, risk) for rule in slim.RULES for risk in (slim.SAFE, slim.REVIEW)]
+        for rule, risk in groups:
+            title, why = slim.RULES[rule]
+            group = sorted((p for p in report.proposals if p.rule == rule and p.risk == risk), key=lambda p: -p.saving)
             if not group:
                 continue
-            risk = group[0].risk
+            if rule == "vram-3d" and risk == slim.REVIEW:
+                title += " (3D use guessed from file names)"
             tag = style.green("safe") if risk == slim.SAFE else style.yellow("review")
             disk = sum(p.disk_delta for p in group)
             gpu = sum(p.gpu_saving for p in group)
@@ -125,15 +148,16 @@ def cmd_slim(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     backup = slim.apply(project, chosen)
+    code, info = _maybe_reimport(project, args, before=report.total_shipped) if backup else (EXIT_OK, {})
     if args.json:
-        dump_json({"applied": [p.to_dict() for p in chosen], "backup": str(backup) if backup else None})
-    elif backup:
+        dump_json({"applied": [p.to_dict() for p in chosen], "backup": str(backup) if backup else None, **info})
+        return code
+    if backup:
         out.write(f"\n  Wrote {len(chosen)} change(s). Backup: {backup.relative_to(project.root)}\n")
+        _print_reimport(info, out)
     else:
         out.write("\n  Nothing to apply.\n")
-    if backup:
-        return _maybe_reimport(project, args, out, before=report.total_shipped)
-    return EXIT_OK
+    return code
 
 
 def _signed(delta: int) -> str:
@@ -142,28 +166,45 @@ def _signed(delta: int) -> str:
     return ("+" if delta > 0 else "-") + human_bytes(abs(delta))
 
 
-def _maybe_reimport(project: GodotProject, args: argparse.Namespace, out: TextIO, before: int | None = None) -> int:
+def _maybe_reimport(project: GodotProject, args: argparse.Namespace, before: int | None = None) -> tuple[int, dict[str, object]]:
+    """Re-import if asked. Returns an exit code and facts for text or JSON output."""
+    import subprocess
+
     from . import slim
 
     if not args.reimport:
-        out.write("  Re-import to see the effect: open the editor, or rerun with --reimport.\n")
-        return EXIT_OK
+        return EXIT_OK, {"reimported": False}
     godot = find_godot(args.godot)
     if not godot:
-        out.write("  Godot not found; cannot re-import. Set GODOT=/path/to/godot.\n")
-        return EXIT_FAIL
-    out.write(f"  Re-importing with Godot {godot.short} (this can take a while)...\n")
-    res = slim.reimport(godot.path, project)
+        return EXIT_FAIL, {"reimported": False, "error": NO_GODOT}
+    if not args.json:
+        sys.stderr.write(f"  Re-importing with Godot {godot.short} (this can take a while)...\n")
+    try:
+        res = slim.reimport(godot.path, project)
+    except subprocess.TimeoutExpired:
+        return EXIT_FAIL, {"reimported": False, "error": "Godot re-import timed out"}
     project.reload_imports()
     after = sum(e.shipped_bytes for e in project.imports)
     if res.returncode != 0:
-        out.write(f"  Godot exited with {res.returncode}. Last output:\n{res.stdout[-1500:]}{res.stderr[-1500:]}\n")
-        return EXIT_FAIL
-    if before:
-        out.write(f"  Imported assets: {human_bytes(before)} -> {human_bytes(after)}\n")
+        tail = (res.stdout + res.stderr)[-1500:]
+        return EXIT_FAIL, {"reimported": False, "error": f"Godot exited with {res.returncode}", "log_tail": tail}
+    return EXIT_OK, {"reimported": True, "shipped_bytes_before": before, "shipped_bytes_after": after}
+
+
+def _print_reimport(info: dict[str, object], out: TextIO) -> None:
+    if info.get("error"):
+        out.write(f"  Re-import failed: {info['error']}\n")
+        if info.get("log_tail"):
+            out.write(f"{info['log_tail']}\n")
+    elif not info.get("reimported"):
+        out.write("  Re-import to see the effect: open the editor, or rerun with --reimport.\n")
     else:
-        out.write(f"  Imported assets now: {human_bytes(after)}\n")
-    return EXIT_OK
+        after = int(str(info["shipped_bytes_after"]))
+        before = info.get("shipped_bytes_before")
+        if isinstance(before, int) and before:
+            out.write(f"  Imported assets: {human_bytes(before)} -> {human_bytes(after)}\n")
+        else:
+            out.write(f"  Imported assets now: {human_bytes(after)}\n")
 
 
 # ---------------------------------------------------------------- build / verify
@@ -175,9 +216,23 @@ def _print_archive(rep: object, out: TextIO, verbose: bool) -> None:
     assert isinstance(rep, ArchiveReport)
     style = Style()
     print_findings(f"Verify · {rep.path.name}", rep.findings, out, verbose=True)
-    if rep.manifest:
-        shown = {k: "/".join(map(str, v)) if isinstance(v, list) else v for k, v in rep.manifest.items()}
-        out.write("\n  " + ", ".join(f"{k}={v}" for k, v in shown.items()) + "\n")
+    m = rep.manifest
+    rows = []
+    if m.get("package"):
+        version = f"version {m.get('version_name', '?')}, code {m.get('version_code', '?')}"
+        rows.append(("package", f"{m['package']} ({version})" + (", debuggable" if m.get("debuggable") else "")))
+    if m.get("target_sdk"):
+        rows.append(("sdk", f"target {m['target_sdk']}, min {m.get('min_sdk', '?')}"))
+    if m.get("signer"):
+        rows.append(("signer", str(m["signer"])))
+    if m.get("permissions"):
+        rows.append(("permissions", ", ".join(map(str, m["permissions"]))))
+    if m.get("modules"):
+        rows.append(("modules", ", ".join(f"{k} {human_bytes(v)}" for k, v in m["modules"].items())))
+    if rows:
+        out.write("\n")
+        for key, val in rows:
+            out.write(f"  {style.dim(f'{key:<12}')} {val}\n")
     out.write("\n" + style.bold("  What is inside (compressed)") + "\n")
     for cat, size in sorted(rep.categories.items(), key=lambda kv: -kv[1]):
         out.write(f"    {human_bytes(size):>10}  {cat}\n")
@@ -196,25 +251,19 @@ def cmd_build(args: argparse.Namespace) -> int:
     style = Style()
     godot = find_godot(args.godot)
     if not godot:
-        out.write("Godot not found. Set GODOT=/path/to/godot or pass --godot.\n")
-        return EXIT_USAGE
+        return _fail(NO_GODOT)
     preset = project.find_preset(args.preset)
     if not preset:
-        out.write(
-            f"No export preset {args.preset!r} found. Run `gsk doctor`.\n"
-            if args.preset
-            else "No Android export preset found. Run `gsk doctor`.\n"
-        )
-        return EXIT_USAGE
+        return _fail(f"no export preset named {args.preset!r}." if args.preset else "no Android export preset. Run `gsk doctor`.")
     release = not args.debug
     output = Path(args.output).resolve() if args.output else default_output(project, preset, release)
     if not args.json:
         out.write(style.bold(f"gsk build · {project.name}") + "\n\n")
         out.write(f"  preset   {preset.name} ({preset_format(preset).upper()}, {'release' if release else 'debug'})\n")
-        out.write(f"  godot    {godot.version}\n  signing  {signing_summary(release)}\n  output   {output}\n\n")
+        out.write(f"  godot    {godot.version}\n  signing  {signing_summary(release, project, preset)}\n  output   {output}\n\n")
         out.flush()
     try:
-        res = export(godot, project, preset, output, release=release, timeout=args.timeout)
+        res = export(godot, project, preset, output, release=release, timeout=args.timeout, install_template=args.install_template)
     except BuildError as exc:
         if args.json:
             dump_json({"ok": False, "error": str(exc), "log": str(exc.log) if exc.log else None, "hints": exc.hints})
@@ -247,8 +296,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     path = Path(args.file)
     if not path.is_file():
-        _out().write(f"{path} does not exist.\n")
-        return EXIT_USAGE
+        return _fail(f"{path} does not exist.")
     project = None
     if args.project:
         project = _open_project(args.project)
@@ -266,20 +314,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_eyes(args: argparse.Namespace) -> int:
     from .eyes.config import EyesConfigError, load_config
     from .eyes.report import write_reports
-    from .eyes.runner import EyesError, run
+    from .eyes.runner import EyesError, check_display, run
 
     project = _open_project(args.project)
     out = _out()
     style = Style()
     godot = find_godot(args.godot)
     if not godot:
-        out.write("Godot not found. Set GODOT=/path/to/godot or pass --godot.\n")
-        return EXIT_USAGE
+        return _fail(NO_GODOT)
     try:
         cfg = load_config(project, Path(args.config) if args.config else None, args.scene, args.device)
-    except EyesConfigError as exc:
-        out.write(f"{exc}\n")
-        return EXIT_USAGE
+        check_display(args.display)
+    except (EyesConfigError, EyesError) as exc:
+        return _fail(str(exc))
     if args.output:
         cfg.output = Path(args.output).resolve()
     if args.threshold is not None:
@@ -304,8 +351,7 @@ def cmd_eyes(args: argparse.Namespace) -> int:
             display=args.display,
         )
     except EyesError as exc:
-        out.write(style.red(str(exc)) + "\n")
-        return EXIT_USAGE
+        return _fail(str(exc))
     paths = write_reports(result)
     if args.json:
         from .eyes.report import to_json
@@ -329,7 +375,7 @@ def cmd_eyes(args: argparse.Namespace) -> int:
         c = result.counts()
         out.write(
             f"\n  {c['pass']} match, {c['changed']} changed, {c['new']} new, {c['updated']} saved, "
-            f"{c['error']} errors in {result.seconds:.0f}s\n"
+            f"{_plural(c['error'], 'error')} in {result.seconds:.0f}s\n"
         )
         out.write(f"  Report: {paths['html']}\n  For agents: {paths['markdown']}\n")
         if c["new"] and not args.update:
@@ -358,11 +404,10 @@ def cmd_configure(args: argparse.Namespace) -> int:
     path = Path(args.settings) if args.settings else editor_settings_path(godot)
     if path is None:
         if not godot:
-            _out().write("Cannot locate editor settings: Godot not found. Pass --settings or --godot.\n")
-            return EXIT_USAGE
+            return _fail("cannot locate editor settings: Godot not found. Pass --settings or --godot.")
         from .env import _user_config_dir
 
-        path = _user_config_dir() / f"editor_settings-{godot.minor}.tres"
+        path = _user_config_dir() / godot.settings_file_name
     values: dict[str, str] = {}
     for flag, key in (
         ("android_sdk", "export/android/android_sdk_path"),
@@ -373,8 +418,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
         if val:
             p = Path(val).expanduser().resolve()
             if not p.exists():
-                _out().write(f"{p} does not exist.\n")
-                return EXIT_USAGE
+                return _fail(f"{p} does not exist.")
             values[key] = str(p)
     if not values:
         _out().write(f"Editor settings: {path}\nNothing to change. Pass --android-sdk, --java-sdk or --debug-keystore.\n")
@@ -397,10 +441,13 @@ def _skill_source() -> Path:
 def cmd_skill(args: argparse.Namespace) -> int:
     src = _skill_source()
     if not src.is_file():
-        _out().write("SKILL.md is not bundled with this install.\n")
-        return EXIT_FAIL
+        return _fail("SKILL.md is not bundled with this install.", EXIT_FAIL)
+    text = src.read_text(encoding="utf-8")
     if args.action == "print":
-        _out().write(src.read_text(encoding="utf-8"))
+        if not args.frontmatter and text.startswith("---"):
+            # The YAML header is for skill loaders; AGENTS.md and rules files want plain Markdown.
+            text = text.split("---", 2)[2].lstrip("\n")
+        _out().write(text)
         return EXIT_OK
     dest_root = Path(args.dir).expanduser() if args.dir else Path.home() / ".claude" / "skills"
     dest = dest_root / "godot-ship-kit" / "SKILL.md"
@@ -408,6 +455,12 @@ def cmd_skill(args: argparse.Namespace) -> int:
     shutil.copy2(src, dest)
     _out().write(f"Installed the godot-ship-kit skill to {dest}\n")
     return EXIT_OK
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from .mcp import serve
+
+    return serve()
 
 
 # ---------------------------------------------------------------- parser
@@ -454,16 +507,21 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("-o", "--output", help="output .apk/.aab path (default: preset export path or build/)")
     b.add_argument("--timeout", type=int, default=3600, help="seconds before the export is killed")
     b.add_argument("--no-verify", action="store_true", help="skip archive verification")
-    b.add_argument("-v", "--verbose", action="store_true")
+    b.add_argument(
+        "--install-template",
+        action="store_true",
+        help="install the Android Gradle build template into android/ first (needed once for Gradle/AAB builds)",
+    )
+    b.add_argument("-v", "--verbose", action="store_true", help="list more of the largest entries")
     b.set_defaults(func=cmd_build)
 
     v = sub.add_parser("verify", help="verify an existing APK/AAB (zip, signature, alignment, target SDK, size)")
-    v.add_argument("file")
+    v.add_argument("file", help="the .apk or .aab to check")
     v.add_argument("--project", help="project folder, to map imported files back to assets")
-    v.add_argument("--godot")
-    v.add_argument("--release", action="store_true", help="fail if signed with a debug certificate")
-    v.add_argument("--json", action="store_true")
-    v.add_argument("-v", "--verbose", action="store_true")
+    v.add_argument("--godot", help="Godot binary, used to find the Android SDK it is configured with")
+    v.add_argument("--release", action="store_true", help="fail if signed with a debug certificate or debuggable")
+    v.add_argument("--json", action="store_true", help="machine-readable output")
+    v.add_argument("-v", "--verbose", action="store_true", help="list more of the largest entries")
     v.set_defaults(func=cmd_verify)
 
     e = sub.add_parser("eyes", help="render scenes headlessly at phone resolutions and diff against references")
@@ -472,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--device", action="append", help="phone, phone-landscape, phone-small, tablet, ... or WxH; repeatable")
     e.add_argument("--config", help="config file (default: <project>/gsk.toml)")
     e.add_argument("--update", action="store_true", help="save the captures as the new references")
-    e.add_argument("--threshold", type=float, help="minimum similarity to count as a match (default 0.985)")
+    e.add_argument("--threshold", type=float, help="minimum similarity to count as a match (default 0.99)")
     e.add_argument("--output", help="report folder (default: <project>/.gsk/eyes)")
     e.add_argument("--rendering-method", help="override renderer (default: the project's mobile renderer)")
     e.add_argument("--rendering-driver", help="override driver, e.g. opengl3 or vulkan")
@@ -491,17 +549,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_checklist)
 
     cf = sub.add_parser("configure", help="write Android SDK / JDK / debug keystore paths into Godot's editor settings")
-    cf.add_argument("--android-sdk")
-    cf.add_argument("--java-sdk")
-    cf.add_argument("--debug-keystore")
+    cf.add_argument("--android-sdk", help="Android SDK folder (with platform-tools and build-tools)")
+    cf.add_argument("--java-sdk", help="JDK 17 folder (the one containing bin/java)")
+    cf.add_argument("--debug-keystore", help="debug.keystore used for debug exports")
     cf.add_argument("--settings", help="editor settings file to edit (default: the one Godot uses)")
-    cf.add_argument("--godot")
+    cf.add_argument("--godot", help="Godot binary, to pick the right editor settings file")
     cf.set_defaults(func=cmd_configure)
 
     sk = sub.add_parser("skill", help="install or print the agent skill (SKILL.md)")
     sk.add_argument("action", choices=["install", "print"])
     sk.add_argument("--dir", help="skills folder (default: ~/.claude/skills)")
+    sk.add_argument("--frontmatter", action="store_true", help="print: keep the YAML header (for skill loaders)")
     sk.set_defaults(func=cmd_skill)
+
+    m = sub.add_parser("mcp", help="run as an MCP server over stdio (tools: doctor, slim, build, verify, eyes, checklist)")
+    m.set_defaults(func=cmd_mcp)
     return p
 
 

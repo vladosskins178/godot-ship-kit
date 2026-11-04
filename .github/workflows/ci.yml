@@ -28,33 +28,19 @@ jobs:
       - run: pytest -m "not godot"
 
   godot:
-    name: End-to-end with Godot ${{ matrix.godot }}
+    name: End-to-end with Godot 4.6.3
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        godot: ["4.6.3"]
-    env:
-      GODOT: ${{ github.workspace }}/.godot-bin/godot
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      # The repository is also a GitHub Action; this exercises it as users would.
+      - name: Set up Godot and gsk
+        uses: ./
         with:
-          python-version: "3.12"
-      - name: Install xvfb and Mesa (software OpenGL)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libglx-mesa0 \
-            libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 libxkbcommon0 libxrender1 libfontconfig1
-      - name: Download Godot ${{ matrix.godot }}
-        run: |
-          mkdir -p .godot-bin && cd .godot-bin
-          curl -fsSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${{ matrix.godot }}-stable/Godot_v${{ matrix.godot }}-stable_linux.x86_64.zip"
-          unzip -q godot.zip && mv Godot_v${{ matrix.godot }}-stable_linux.x86_64 godot && chmod +x godot
-          ./godot --headless --version
-      - run: pip install -e ".[dev]"
+          args: --version
       - name: Import the sample project
         run: $GODOT --headless --path examples/hello-ship --import
+
       - name: gsk doctor (no Android SDK on this runner, so errors are expected)
         run: gsk doctor examples/hello-ship --verbose || true
       - name: gsk slim
@@ -63,11 +49,14 @@ jobs:
         run: gsk play-checklist examples/hello-ship > /dev/null
       - name: gsk eyes against the committed references
         run: gsk eyes examples/hello-ship --display xvfb
+
+      - run: pip install --quiet -e ".[dev]"
       - name: End-to-end tests
         run: pytest -m godot
+
       - name: Upload the eyes report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eyes-report-godot-${{ matrix.godot }}
+          name: eyes-report
           path: examples/hello-ship/.gsk/eyes

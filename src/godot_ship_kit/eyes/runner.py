@@ -104,8 +104,88 @@ class EyesRun:
         return out
 
 
-def capture_script() -> Path:
-    return Path(str(resources.files("godot_ship_kit.eyes").joinpath("capture.gd")))
+def capture_template() -> str:
+    return resources.files("godot_ship_kit.eyes").joinpath("capture.gd").read_text(encoding="utf-8")
+
+
+def gd_literal(value: Any) -> str:
+    """A GDScript literal for a JSON-like value from gsk.toml."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value) if value == value and abs(value) != float("inf") else "0.0"
+    if isinstance(value, str):
+        return json.dumps(value)  # JSON string escapes are valid GDScript escapes
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(gd_literal(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{json.dumps(str(k))}: {gd_literal(v)}" for k, v in value.items()) + "}"
+    raise EyesError(f"Unsupported value in an action: {value!r}")
+
+
+def _f(value: Any, name: str) -> str:
+    try:
+        return repr(float(value))
+    except (TypeError, ValueError):
+        raise EyesError(f"Action field {name!r} must be a number, got {value!r}") from None
+
+
+def _action_code(action: dict[str, Any]) -> str:
+    then = _f(action.get("then_wait", 0.3), "then_wait")
+    if "wait" in action:
+        return f"await _wait_seconds({_f(action['wait'], 'wait')}, 1)"
+    if "tap" in action:
+        at = action["tap"]
+        if not isinstance(at, list) or len(at) != 2:
+            raise EyesError(f"tap needs [x, y] as fractions of the screen, got {at!r}")
+        return f"await _tap({_f(at[0], 'tap')}, {_f(at[1], 'tap')}, {then})"
+    if "press" in action:
+        return f"await _press({gd_literal(str(action['press']))}, {then})"
+    node = gd_literal(str(action.get("node", "")))
+    if "call" in action:
+        args = action.get("args", [])
+        if not isinstance(args, list):
+            raise EyesError(f"args must be a list, got {args!r}")
+        return f"await _call_node({node}, {gd_literal(str(action['call']))}, {gd_literal(args)})"
+    if "set" in action:
+        return f"await _set_node({node}, {gd_literal(str(action['set']))}, {gd_literal(action.get('value'))})"
+    raise EyesError(f"Unknown action {action!r}; use wait, tap, press, call or set.")
+
+
+def render_capture_script(width: int, height: int, out_dir: Path, budget_seconds: float, shots: list[Shot]) -> str:
+    """Fill the capture template with typed code for these shots."""
+    body: list[str] = []
+    for s in shots:
+        name, scene = gd_literal(s.name), gd_literal(s.scene)
+        body += [
+            "\tif _over_budget():",
+            "\t\treturn 3",
+            f"\tif await _open_scene({name}, {scene}, {_f(s.wait, 'wait')}):",
+        ]
+        body += [f"\t\t{_action_code(a)}" for a in s.actions]
+        body += [
+            f"\t\tif not await _save({name}, {scene}):",
+            "\t\t\tcode = 1",
+            "\telse:",
+            "\t\tcode = 1",
+        ]
+    text = capture_template()
+    replacements = {
+        "const WIDTH: int = 0  # @@WIDTH@@": f"const WIDTH: int = {int(width)}",
+        "const HEIGHT: int = 0  # @@HEIGHT@@": f"const HEIGHT: int = {int(height)}",
+        'const OUT_DIR: String = ""  # @@OUT_DIR@@': f"const OUT_DIR: String = {gd_literal(out_dir.resolve().as_posix())}",
+        "const BUDGET_MS: int = 0  # @@BUDGET_MS@@": f"const BUDGET_MS: int = {int(budget_seconds * 1000)}",
+        "\tpass  # @@SHOTS@@": "\n".join(body) or "\tpass",
+    }
+    for marker, value in replacements.items():
+        if marker not in text:
+            raise EyesError(f"capture template is missing {marker!r}")
+        text = text.replace(marker, value)
+    return text
 
 
 def display_usable(display: str | None) -> bool:
@@ -133,10 +213,15 @@ def _display_wrapper(width: int, height: int, mode: str = "auto") -> list[str]:
     xvfb = shutil.which("xvfb-run")
     if not xvfb:
         raise EyesError(
-            "No display and no xvfb-run found. Install it (Debian/Ubuntu: sudo apt install xvfb "
+            "no display and no xvfb-run found. Install it (Debian/Ubuntu: sudo apt install xvfb "
             "libgl1-mesa-dri) or run inside a desktop session."
         )
     return [xvfb, "-a", "-s", f"-screen 0 {width + 64}x{height + 64}x24"]
+
+
+def check_display(mode: str = "auto") -> None:
+    """Fail early (before any output) when no display can be used."""
+    _display_wrapper(64, 64, mode)
 
 
 def _ensure_gdignore(folder: Path) -> None:
@@ -166,14 +251,8 @@ def run_device(
         for ext in (".png", ".json"):
             (out_dir / f"{s.name}{ext}").unlink(missing_ok=True)
     budget = cfg.boot_seconds + sum(s.wait + 5 + 2 * len(s.actions) for s in shots) * 3
-    job = {
-        "size": [w, h],
-        "output_dir": str(out_dir.resolve()),
-        "budget_seconds": budget,
-        "shots": [s.job_dict(s.name) for s in shots],
-    }
-    job_path = out_dir / "job.json"
-    job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    script = out_dir / "capture.gd"
+    script.write_text(render_capture_script(w, h, out_dir, budget, shots), encoding="utf-8")
 
     cmd = [
         *_display_wrapper(w, h, display),
@@ -193,7 +272,7 @@ def run_device(
         cmd += ["--rendering-method", rendering_method]
     if rendering_driver:
         cmd += ["--rendering-driver", rendering_driver]
-    cmd += ["-s", str(capture_script()), "--", f"--gsk-job={job_path.resolve()}"]
+    cmd += ["-s", str(script.resolve())]
 
     env = dict(os.environ)
     if software:
@@ -303,10 +382,14 @@ def analyse_shot(
     res.diff_image = diff_path if not res.diff.size_mismatch else None
     threshold = shot.threshold if shot.threshold is not None else cfg.threshold
     max_changed = shot.max_changed if shot.max_changed is not None else cfg.max_changed
+    region_px = shot.region_pixels if shot.region_pixels is not None else cfg.region_pixels
+    # A small but concentrated change (one digit, a missing icon) matters even when the
+    # frame as a whole barely moves, so one dense region is enough to fail.
+    local = region_px > 0 and res.diff.largest_region_px >= region_px
     if res.diff.size_mismatch:
         res.status = "changed"
         res.alerts.append(Alert("error", "Screenshot size differs from the reference."))
-    elif res.diff.similarity >= threshold and res.diff.changed_ratio <= max_changed:
+    elif res.diff.similarity >= threshold and res.diff.changed_ratio <= max_changed and not local:
         res.status = "pass"
     else:
         res.status = "changed"

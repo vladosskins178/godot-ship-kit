@@ -43,9 +43,7 @@ class Shot:
     devices: list[str] | None = None
     threshold: float | None = None
     max_changed: float | None = None
-
-    def job_dict(self, shot_id: str) -> dict[str, Any]:
-        return {"name": shot_id, "scene": self.scene, "wait": self.wait, "actions": self.actions}
+    region_pixels: int | None = None
 
 
 @dataclass
@@ -54,9 +52,10 @@ class EyesConfig:
     devices: list[str]
     references: Path
     output: Path
-    threshold: float = 0.985
-    max_changed: float = 0.003
+    threshold: float = 0.99
+    max_changed: float = 0.0005
     tolerance: int = 24
+    region_pixels: int = 40
     boot_seconds: float = 120.0
 
 
@@ -77,6 +76,25 @@ def default_devices(project: GodotProject) -> list[str]:
         h = project.setting("display/window/size/viewport_height", 648)
         portrait = isinstance(w, int) and isinstance(h, int) and h > w
     return ["phone"] if portrait else ["phone-landscape"]
+
+
+def _scene_res(project: GodotProject, given: str) -> str:
+    """A scene given as a file path: relative to the current folder, else to the project."""
+    for cand in (Path(given), project.root / given):
+        if cand.is_file():
+            try:
+                return project.path_to_res(cand)
+            except ValueError:
+                raise EyesConfigError(f"Scene {given} is outside the project.") from None
+    raise EyesConfigError(f"Scene {given} not found.")
+
+
+def _inside(project: GodotProject, rel: str, key: str) -> Path:
+    """Resolve a folder from gsk.toml; it must stay inside the project (use --output to go elsewhere)."""
+    path = (project.root / rel).resolve()
+    if not path.is_relative_to(project.root.resolve()):
+        raise EyesConfigError(f"[eyes] {key} = {rel!r} points outside the project.")
+    return path
 
 
 def _slug(text: str) -> str:
@@ -100,7 +118,7 @@ def load_config(
     shots: list[Shot] = []
     if scenes:
         for s in scenes:
-            res = s if s.startswith(("res://", "uid://")) else project.path_to_res(Path(s))
+            res = s if s.startswith(("res://", "uid://")) else _scene_res(project, s)
             shots.append(Shot(name=_slug(Path(res.removeprefix("res://")).stem), scene=res, wait=float(data.get("wait", 1.0))))
     else:
         for raw in data.get("shot", []):
@@ -120,6 +138,7 @@ def load_config(
                     devices=raw.get("devices"),
                     threshold=raw.get("threshold"),
                     max_changed=raw.get("max_changed"),
+                    region_pixels=raw.get("region_pixels"),
                 )
             )
     if not shots:
@@ -127,6 +146,9 @@ def load_config(
             shots.append(Shot(name="main", scene=project.main_scene, wait=float(data.get("wait", 2.0))))
         else:
             raise EyesConfigError("Nothing to capture: no scenes given, no [[eyes.shot]] in gsk.toml and no main scene.")
+    for shot in shots:
+        if shot.scene.startswith("res://") and not project.res_to_path(shot.scene).is_file():
+            raise EyesConfigError(f"Scene {shot.scene} not found (shot '{shot.name}').")
     names = [s.name for s in shots]
     dupes = {n for n in names if names.count(n) > 1}
     if dupes:
@@ -138,10 +160,11 @@ def load_config(
     return EyesConfig(
         shots=shots,
         devices=list(devs),
-        references=project.root / data.get("references", "tests/eyes"),
-        output=project.root / data.get("output", ".gsk/eyes"),
-        threshold=float(data.get("threshold", 0.985)),
-        max_changed=float(data.get("max_changed", 0.003)),
+        references=_inside(project, str(data.get("references", "tests/eyes")), "references"),
+        output=_inside(project, str(data.get("output", ".gsk/eyes")), "output"),
+        threshold=float(data.get("threshold", 0.99)),
+        max_changed=float(data.get("max_changed", 0.0005)),
         tolerance=int(data.get("tolerance", 24)),
+        region_pixels=int(data.get("region_pixels", 40)),
         boot_seconds=float(data.get("boot_seconds", 120)),
     )

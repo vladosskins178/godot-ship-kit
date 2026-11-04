@@ -90,3 +90,32 @@ def test_reference_index_handles_runtime_paths(example: Path) -> None:
     assert idx.is_referenced("res://art/ground_albedo.jpg")
     assert not idx.is_referenced("res://art/never_used.png")
     assert "res://art/ground_albedo.jpg" in idx.texture_3d_hint
+
+
+def test_standalone_tres_material_and_sprite3d() -> None:
+    from godot_ship_kit.project import _material_textures
+
+    tres = (
+        '[gd_resource type="StandardMaterial3D" load_steps=2 format=3]\n\n'
+        '[ext_resource type="Texture2D" path="res://rock/rock_albedo.png" id="1"]\n\n'
+        '[resource]\nalbedo_texture = ExtResource("1")\n'
+    )
+    assert _material_textures(tres) == {"res://rock/rock_albedo.png"}
+    tscn = (
+        '[gd_scene format=3]\n\n[ext_resource type="Texture2D" path="res://fx/smoke.png" id="1"]\n\n'
+        '[node name="Smoke" type="Sprite3D"]\ntexture = ExtResource("1")\n'
+    )
+    assert _material_textures(tscn) == {"res://fx/smoke.png"}
+
+
+def test_uid_main_scene(example: Path) -> None:
+    menu = example / "scenes" / "menu.tscn"
+    menu.write_text(menu.read_text().replace("[gd_scene load_steps=8 format=3]", '[gd_scene load_steps=8 format=3 uid="uid://abc123"]'))
+    pg = example / "project.godot"
+    pg.write_text(pg.read_text().replace('run/main_scene="res://scenes/menu.tscn"', 'run/main_scene="uid://abc123"'))
+    p = GodotProject.open(example)
+    assert p.main_scene == "uid://abc123"
+    assert p.main_scene_res == "res://scenes/menu.tscn"
+    (example / "scenes" / "menu.gd.uid").write_text("uid://scr1\n")
+    assert p.resolve_uid("uid://scr1") == "res://scenes/menu.gd"
+    assert p.resolve_uid("uid://missing") is None

@@ -57,7 +57,19 @@ MATERIAL_SUFFIX = re.compile(
     r"(albedo|diffuse|basecolor|base_color|_color|normal|_nrm|rough|metal|_orm|_ao\b|occlusion|emission|emissive|height|_disp|_col\b)",
     re.I,
 )
-NORMAL_NAME = re.compile(r"(normal|_nrm|_nor\b|_n\.)", re.I)
+NORMAL_TOKENS = {"normal", "normals", "normalgl", "normaldx", "normalmap", "nrm", "nor"}
+
+
+def is_normal_map_name(path: Path) -> bool:
+    """``rock_normal.png``, ``wall-nrm.png``, ``rock_NormalGL_<uuid>.jpg``, ``brick_n.png``.
+
+    Token based, so ``Leaves_NormalTree.png`` or ``button_normal_state`` style names in UI
+    folders are not mistaken for normal maps.
+    """
+    tokens = [t for t in re.split(r"[_\-.\s]+", path.stem.lower()) if t]
+    return any(t in NORMAL_TOKENS for t in tokens) or (len(tokens) > 1 and tokens[-1] == "n")
+
+
 UI_HINT = re.compile(r"(^|[/_\-])(ui|hud|gui|icons?|fonts?|buttons?|menu|frames?|portraits?)([/_\-.]|$)", re.I)
 
 
@@ -167,18 +179,25 @@ def kind_of(entry: ImportEntry) -> str:
     return "other"
 
 
-def is_3d_texture(project: GodotProject, entry: ImportEntry) -> bool:
-    """Heuristic: is this texture sampled by 3D materials?"""
-    if int(entry.params.get("detect_3d/compress_to", 0) or 0) and entry.compress_mode == 2:
-        return True
-    src = entry.source_path
+def texture_3d_evidence(project: GodotProject, entry: ImportEntry) -> str | None:
+    """Why we think a texture is sampled by 3D materials, or None.
+
+    ``"model"`` and ``"material"`` are hard evidence; ``"name"`` is only a naming
+    convention (``*_albedo``, ``*_normal``, ...) and never drives a safe change.
+    """
     if UI_HINT.search(entry.res_path):
-        return False
+        return None
     if _is_glb_sidecar(entry):
-        return True  # textures extracted from a GLB/FBX sit next to it with its name as prefix
+        return "model"  # textures extracted from a GLB/FBX sit next to it with its name as prefix
     if entry.res_path in project.reference_index.texture_3d_hint:
-        return True
-    return bool(MATERIAL_SUFFIX.search(src.name))
+        return "material"
+    if MATERIAL_SUFFIX.search(entry.source_path.name):
+        return "name"
+    return None
+
+
+def is_3d_texture(project: GodotProject, entry: ImportEntry) -> bool:
+    return texture_3d_evidence(project, entry) is not None
 
 
 def _vram_bytes(w: int, h: int, wide: bool, mipmaps: bool) -> int:
@@ -207,11 +226,12 @@ def _has_alpha(path: Path) -> bool:
         return False
     try:
         with path.open("rb") as fh:
-            head = fh.read(26)
+            head = fh.read(64 * 1024)
         if head.startswith(b"\x89PNG"):
             color_type = head[25]
-            return color_type in (4, 6)
-    except OSError:
+            # RGBA / grey+alpha, or a palette / grey / RGB image with a tRNS chunk.
+            return color_type in (4, 6) or b"tRNS" in head
+    except (OSError, IndexError):
         pass
     return True
 
@@ -233,12 +253,12 @@ def analyze(
     for e in entries:
         if e.is_texture:
             proposals += _texture_rules(project, e, max_3d, max_2d)
-        elif e.importer == "wav":
-            proposals += _wav_rules(e)
+        elif e.importer == "wav" and _version_at_least(project.godot_version, (4, 3)):
+            proposals += _wav_rules(e)  # QOA compression arrived in Godot 4.3
     proposals.sort(key=lambda p: (p.risk != SAFE, -p.saving))
 
     idx = project.reference_index
-    main = project.main_scene or ""
+    main = project.main_scene_res or ""
     unreferenced = sorted(
         (
             e
@@ -261,9 +281,20 @@ def analyze(
     return SlimReport(sum(by_kind.values()), by_kind, biggest, proposals, unreferenced, heavy_models[:top], has_cache)
 
 
+def _version_at_least(version: str | None, minimum: tuple[int, int]) -> bool:
+    if not version:
+        return True
+    try:
+        major, minor = (int(x) for x in version.split(".")[:2])
+    except ValueError:
+        return True
+    return (major, minor) >= minimum
+
+
 def _is_glb_sidecar(e: ImportEntry) -> bool:
+    """``tree_Image_0.png`` or ``tree_normal.png`` next to ``tree.glb`` (Godot extracts them like that)."""
     stem = e.source_path.stem.lower()
-    return any(stem.startswith(s) for s in _scene_stems(e.source_path.parent))
+    return any(stem == s or (stem.startswith(s) and stem[len(s)] in "_-. ") for s in _scene_stems(e.source_path.parent))
 
 
 @lru_cache(maxsize=4096)
@@ -280,12 +311,13 @@ def _texture_rules(project: GodotProject, e: ImportEntry, max_3d: int, max_2d: i
     alpha = _has_alpha(e.source_path)
     limit = int(e.params.get("process/size_limit", 0) or 0)
     mip = bool(e.params.get("mipmaps/generate", False))
-    three_d = is_3d_texture(project, e)
+    evidence = texture_3d_evidence(project, e)
+    three_d = evidence is not None
     mode = e.compress_mode
     cur = _capped(dims, limit) if dims else None
 
     if three_d:
-        is_normal = bool(NORMAL_NAME.search(e.source_path.name))
+        is_normal = is_normal_map_name(e.source_path)
         # Normal-map compression stores two channels at 8 bits per pixel (EAC RG11).
         wide = alpha or is_normal
         changes: dict[str, Any] = {}
@@ -298,7 +330,10 @@ def _texture_rules(project: GodotProject, e: ImportEntry, max_3d: int, max_2d: i
             changes["compress/normal_map"] = 1
             reasons.append("normal map without normal compression")
         if changes:
-            prop = Proposal("vram-3d", SAFE, e, changes, "; ".join(reasons), e.shipped_bytes)
+            if evidence == "name":
+                reasons.append("3D use guessed from the file name only")
+            risk = SAFE if evidence in ("model", "material") else REVIEW
+            prop = Proposal("vram-3d", risk, e, changes, "; ".join(reasons), e.shipped_bytes)
             if cur and mode in (0, 1):
                 prop.estimated_bytes = _vram_bytes(*cur, wide, True)
                 prop.gpu_before = _rgba_bytes(*cur, mip)
@@ -314,7 +349,7 @@ def _texture_rules(project: GodotProject, e: ImportEntry, max_3d: int, max_2d: i
                     REVIEW,
                     e,
                     {"process/size_limit": max_3d},
-                    f"{dims[0]}x{dims[1]} source",
+                    f"{dims[0]}x{dims[1]} source" + (", sizes assume VRAM compression" if mode in (0, 1) else ""),
                     before if mode in (0, 1) or "compress/mode" in changes else e.shipped_bytes,
                     _vram_bytes(w, h, wide, True),
                     gpu_before=before,
@@ -401,8 +436,10 @@ def apply(project: GodotProject, proposals: list[Proposal]) -> Path | None:
         dst = backup / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, dst)
-        text = path.read_text(encoding="utf-8")
-        path.write_text(godot_cfg.set_values(text, "params", changes), encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as fh:  # keep the file's own line endings
+            text = fh.read()
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(godot_cfg.set_values(text, "params", changes))
         files.append({"file": rel.as_posix(), "changes": changes})
     (backup / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     _ensure_gitignored(project)
@@ -432,8 +469,25 @@ def undo(project: GodotProject, name: str | None = None) -> Path | None:
     if target is None:
         return None
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
-    for item in manifest["files"]:
-        shutil.copy2(target / item["file"], project.root / item["file"])
+    root = project.root.resolve()
+    pairs: list[tuple[Path, Path]] = []
+    for item in manifest.get("files", []):
+        rel = str(item.get("file", ""))
+        src, dst = target / rel, project.root / rel
+        # A manifest is data from disk (possibly from a cloned repo): only restore
+        # regular .import files that stay inside the backup and the project.
+        if (
+            not rel.endswith(".import")
+            or Path(rel).is_absolute()
+            or src.is_symlink()
+            or dst.is_symlink()
+            or not src.resolve().is_relative_to(target.resolve())
+            or not dst.resolve().is_relative_to(root)
+        ):
+            raise ValueError(f"Refusing to restore {rel!r} from {target.name}: not an .import file inside the project")
+        pairs.append((src, dst))
+    for src, dst in pairs:
+        shutil.copy2(src, dst)
     shutil.move(str(target), str(target.with_name(target.name + ".restored")))
     project.reload_imports()
     return target
@@ -465,16 +519,19 @@ def glb_triangles(path: Path) -> int | None:
             doc = json.loads(fh.read(length))
     except (OSError, ValueError, struct.error):
         return None
-    accessors = doc.get("accessors", [])
-    total = 0
-    for mesh in doc.get("meshes", []):
-        for prim in mesh.get("primitives", []):
-            if prim.get("mode", 4) != 4:
-                continue
-            if "indices" in prim:
-                count = accessors[prim["indices"]].get("count", 0)
-            else:
-                pos = prim.get("attributes", {}).get("POSITION")
-                count = accessors[pos].get("count", 0) if pos is not None else 0
-            total += count // 3
-    return total
+    try:
+        accessors = doc.get("accessors", [])
+        total = 0
+        for mesh in doc.get("meshes", []):
+            for prim in mesh.get("primitives", []):
+                if prim.get("mode", 4) != 4:
+                    continue
+                if "indices" in prim:
+                    count = accessors[prim["indices"]].get("count", 0)
+                else:
+                    pos = prim.get("attributes", {}).get("POSITION")
+                    count = accessors[pos].get("count", 0) if pos is not None else 0
+                total += int(count) // 3
+        return total
+    except (IndexError, KeyError, TypeError, AttributeError, ValueError):
+        return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from .env import AndroidToolchain, GodotBinary, android_toolchain, find_godot, j
 from .godot_cfg import as_list
 from .project import GodotProject, Preset, image_size
 from .report import Finding, Severity, human_bytes
+from .slim import is_normal_map_name
 
 F = Finding
 S = Severity
@@ -27,7 +29,6 @@ HEAVY_ENV_KEYS = {
     "ssao_enabled": "SSAO",
     "volumetric_fog_enabled": "volumetric fog",
 }
-NORMAL_NAME = re.compile(r"(normal|_nrm|_nor\b|_n\.)", re.I)
 
 
 @dataclass
@@ -61,6 +62,7 @@ def run_doctor(
         _check_icons,
         _check_signing,
         _check_git_hygiene,
+        _check_plaintext_secrets,
         _check_sdk,
         _check_jdk,
         _check_renderer,
@@ -96,8 +98,10 @@ def _check_project(ctx: DoctorContext, _: str | None) -> list[Finding]:
                 "Project Settings > Application > Run > Main Scene.",
             )
         )
-    elif not p.res_to_path(p.main_scene).exists() and not p.main_scene.startswith("uid://"):
-        out.append(F("project.main_scene", S.ERROR, f"Main scene {p.main_scene} does not exist"))
+    else:
+        resolved = p.main_scene_res or p.main_scene
+        if resolved.startswith("uid://") or not p.res_to_path(resolved).exists():
+            out.append(F("project.main_scene", S.ERROR, f"Main scene {p.main_scene} does not exist"))
     return out
 
 
@@ -135,12 +139,34 @@ def _check_godot(ctx: DoctorContext, _: str | None) -> list[Finding]:
                 S.ERROR,
                 f"Android export templates for {g.template_dir_name} are missing",
                 f"Expected in {tdir}: {', '.join(missing)}",
-                f"Editor > Manage Export Templates > Download, or unpack Godot_v{g.short}-stable_export_templates.tpz into that folder.",
+                "Editor > Manage Export Templates > Download, or unpack "
+                f"Godot_v{g.short}-stable{'_mono' if g.is_mono else ''}_export_templates.tpz into that folder.",
                 "https://godotengine.org/download/archive/",
             )
         )
     else:
         out.append(F("godot.templates", S.OK, f"Export templates {g.template_dir_name} installed"))
+    uses_csharp = any(ctx.project.root.glob("*.csproj"))
+    if uses_csharp and not g.is_mono:
+        out.append(
+            F(
+                "godot.dotnet",
+                S.ERROR,
+                "The project uses C# but this Godot binary is not the .NET build",
+                fix="Use the Godot .NET (mono) binary and its export templates.",
+            )
+        )
+    elif g.is_mono or uses_csharp:
+        ok = shutil.which("dotnet") is not None
+        out.append(
+            F(
+                "godot.dotnet",
+                S.OK if ok else S.ERROR,
+                ".NET SDK found" if ok else ".NET SDK (dotnet) not found",
+                fix="" if ok else "Install the .NET SDK version your Godot release requires (see the Godot C# docs).",
+                docs="" if ok else "https://docs.godotengine.org/en/stable/tutorials/scripting/c_sharp/c_sharp_basics.html",
+            )
+        )
     return out
 
 
@@ -254,7 +280,8 @@ def _check_preset(ctx: DoctorContext, preset_name: str | None) -> list[Finding]:
                     S.ERROR,
                     "Gradle build is on but the Android build template is not installed",
                     "android/build/ is missing.",
-                    "Project > Install Android Build Template, or run `godot --headless --path . --install-android-build-template`.",
+                    "Run `gsk build --install-template` (passes --install-android-build-template to Godot), "
+                    "or Project > Install Android Build Template in the editor.",
                 )
             )
         elif ctx.godot and version_file.is_file():
@@ -461,13 +488,19 @@ def _secret_state(ctx: DoctorContext, kind: str) -> tuple[str, str, bool, str]:
     up = kind.upper()
     path = os.environ.get(f"GODOT_ANDROID_KEYSTORE_{up}_PATH", "")
     source = f"$GODOT_ANDROID_KEYSTORE_{up}_PATH" if path else ""
+    creds = ctx.project.credentials.section(f"preset.{p.index}.options") if p else {}
     if not path and p:
         path = str(p.opt(f"keystore/{kind}", "") or "")
         source = f"preset keystore/{kind}" if path else ""
+    if not path and creds.get(f"keystore/{kind}"):
+        path, source = str(creds[f"keystore/{kind}"]), ".godot/export_credentials.cfg"
     if not path and kind == "debug" and ctx.toolchain.debug_keystore:
         path, source = str(ctx.toolchain.debug_keystore), "editor settings"
-    creds = ctx.project.credentials.section(f"preset.{p.index}.options") if p else {}
-    has_pw = bool(os.environ.get(f"GODOT_ANDROID_KEYSTORE_{up}_PASSWORD") or creds.get(f"keystore/{kind}_password"))
+    has_pw = bool(
+        os.environ.get(f"GODOT_ANDROID_KEYSTORE_{up}_PASSWORD")
+        or creds.get(f"keystore/{kind}_password")
+        or (p.opt(f"keystore/{kind}_password") if p else "")
+    )
     if kind == "debug" and not has_pw and source == "editor settings":
         has_pw = True  # editor settings carry the debug password
     user = (
@@ -551,10 +584,20 @@ def _check_signing(ctx: DoctorContext, _: str | None) -> list[Finding]:
 
 def _git_tracked(root: Path) -> set[str] | None:
     try:
-        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=20)
+        top = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
         if top.returncode != 0:
             return None
-        files = subprocess.run(["git", "-C", str(root), "ls-files", "--full-name", "-z"], capture_output=True, text=True, timeout=60)
+        files = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(root), "ls-files", "--full-name", "-z"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     prefix = root.resolve().relative_to(Path(top.stdout.strip()).resolve()).as_posix()
@@ -574,7 +617,7 @@ def _check_git_hygiene(ctx: DoctorContext, _: str | None) -> list[Finding]:
     if tracked is None:
         return []
     out: list[Finding] = []
-    leaked = sorted(f for f in tracked if f.endswith((".keystore", ".jks", "export_credentials.cfg")) and "debug" not in f)
+    leaked = sorted(f for f in tracked if f.endswith((".keystore", ".jks", "export_credentials.cfg")) and Path(f).name != "debug.keystore")
     if leaked:
         out.append(
             F(
@@ -598,6 +641,32 @@ def _check_git_hygiene(ctx: DoctorContext, _: str | None) -> list[Finding]:
     if not out:
         out.append(F("git.secrets", S.OK, "No keystores or export credentials tracked by git"))
     return out
+
+
+SECRET_OPTION = re.compile(r"(release_password|release_user|script_encryption_key)$")
+
+
+def _check_plaintext_secrets(ctx: DoctorContext, _: str | None) -> list[Finding]:
+    """Passwords belong in .godot/export_credentials.cfg or env vars, never in export_presets.cfg."""
+    found = sorted(
+        f"preset '{p.name}': {k}"
+        for p in ctx.project.presets
+        for k, v in {**p.values, **p.options}.items()
+        if SECRET_OPTION.search(k) and str(v or "").strip()
+    )
+    if not found:
+        return []
+    tracked = ctx.tracked_files is not None and "export_presets.cfg" in ctx.tracked_files
+    return [
+        F(
+            "git.preset_secrets",
+            S.ERROR if tracked else S.WARN,
+            "export_presets.cfg contains secrets in plain text" + (" and is committed to git" if tracked else ""),
+            "\n".join(found) + "\n(values not shown)",
+            "Remove them from export_presets.cfg and use GODOT_ANDROID_KEYSTORE_* environment variables. "
+            "If the file was ever pushed, rotate the key.",
+        )
+    ]
 
 
 # ---------------------------------------------------------------- toolchain
@@ -861,7 +930,7 @@ def _check_textures(ctx: DoctorContext, _: str | None) -> list[Finding]:
     normals = [
         e
         for e in textures
-        if NORMAL_NAME.search(e.source_path.name) and e.compress_mode == 2 and int(e.params.get("compress/normal_map", 0) or 0) == 0
+        if is_normal_map_name(e.source_path) and e.compress_mode == 2 and int(e.params.get("compress/normal_map", 0) or 0) == 0
     ]
     if normals:
         out.append(
@@ -912,14 +981,26 @@ def _check_size(ctx: DoctorContext, _: str | None) -> list[Finding]:
         "Sum of imported resources that ship on Android (uncompressed). The engine library adds about 25 MB "
         f"compressed per architecture. Limits checked {playreq.CHECKED}."
     )
-    if mb > playreq.AAB_BASE_MODULE_LIMIT_MB:
+    if mb > playreq.AAB_ASSET_PACK_LIMIT_MB:
         return [
             F(
                 "size.estimate",
                 S.ERROR,
-                f"Imported assets alone are {human_bytes(total)}; Play's base module limit is {playreq.AAB_BASE_MODULE_LIMIT_MB} MB",
+                f"Imported assets alone are {human_bytes(total)}; Play allows at most 1.5 GB per asset pack",
                 detail,
-                "Run `gsk slim`, or move content to Play Asset Delivery packs.",
+                "Run `gsk slim`, and split content into on-demand Play Asset Delivery packs.",
+                playreq.SIZE_LIMITS_URL,
+            )
+        ]
+    if mb > playreq.AAB_BASE_MODULE_LIMIT_MB:
+        return [
+            F(
+                "size.estimate",
+                S.WARN,
+                f"Imported assets are {human_bytes(total)}, above Play's {playreq.AAB_BASE_MODULE_LIMIT_MB} MB base module limit",
+                detail + "\nRecent Godot versions put assets in an install-time asset pack (up to 1.5 GB), older ones in "
+                "the base module. Build the AAB and check it with `gsk verify`.",
+                "Run `gsk slim` to find the biggest wins.",
                 playreq.SIZE_LIMITS_URL,
             )
         ]

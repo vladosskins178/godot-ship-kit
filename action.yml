@@ -1,0 +1,72 @@
+name: godot-ship-kit
+description: Install Godot and gsk, then run a gsk command (doctor, slim, build, eyes, ...) on a Godot 4 project.
+author: Vladislav Y
+branding:
+  icon: smartphone
+  color: blue
+
+inputs:
+  args:
+    description: Arguments for gsk, for example "eyes path/to/game" or "doctor --strict".
+    required: true
+  godot-version:
+    description: Godot release to download (the "-stable" build).
+    default: "4.6.3"
+  export-templates:
+    description: Also install the export templates (needed for gsk build).
+    default: "false"
+  python-version:
+    description: Python used to run gsk.
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install xvfb and Mesa
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends xvfb xauth libgl1-mesa-dri libglx-mesa0 \
+          libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 libxkbcommon0 libxrender1 libfontconfig1
+
+    - name: Download Godot ${{ inputs.godot-version }}
+      shell: bash
+      env:
+        GODOT_VERSION: ${{ inputs.godot-version }}
+        WITH_TEMPLATES: ${{ inputs.export-templates }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TOOL_CACHE/godot-$GODOT_VERSION"
+        mkdir -p "$dir" && cd "$dir"
+        base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+        zip="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+        curl -fsSL -o SHA512-SUMS.txt "$base/SHA512-SUMS.txt"
+        curl -fsSL -o "$zip" "$base/$zip"
+        grep " $zip\$" SHA512-SUMS.txt | sha512sum -c -
+        unzip -q -o "$zip" && mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" godot && chmod +x godot
+        if [ "$WITH_TEMPLATES" = "true" ]; then
+          tpz="Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          curl -fsSL -o "$tpz" "$base/$tpz"
+          grep " $tpz\$" SHA512-SUMS.txt | sha512sum -c -
+          dest="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$dest" && unzip -q -o "$tpz" && mv templates/* "$dest/"
+        fi
+        echo "GODOT=$dir/godot" >> "$GITHUB_ENV"
+
+    - name: Install gsk
+      shell: bash
+      run: pip install --quiet "${{ github.action_path }}[eyes]"
+
+    - name: gsk ${{ inputs.args }}
+      shell: bash
+      env:
+        GSK_ARGS: ${{ inputs.args }}
+      run: |
+        # Word-split the arguments on purpose (paths with spaces need quoting in "args").
+        # shellcheck disable=SC2086
+        gsk $GSK_ARGS

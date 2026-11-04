@@ -10,7 +10,8 @@ will probably hurt you (rejection, crash on some phones, a much bigger download)
 | `project.main_scene` | a main scene is set and exists | error |
 | `godot.binary` | Godot 4 binary from `--godot`, `$GODOT` or PATH | error |
 | `godot.version` | binary minor version matches `config/features` | warn |
-| `godot.templates` | `android_source.zip`, `android_release.apk`, `android_debug.apk` for the exact version | error |
+| `godot.templates` | `android_source.zip`, `android_release.apk`, `android_debug.apk` for the exact version (`.mono` folder for .NET builds) | error |
+| `godot.dotnet` | C# projects use the .NET build of Godot and have the `dotnet` SDK | error |
 | `preset.android` | an Android export preset exists | error |
 | `preset.package` | `package/unique_name` is reverse-domain and not `com.example.*` | error |
 | `preset.version` | `version/code` positive, `version/name` set | error / warn |
@@ -27,6 +28,7 @@ will probably hurt you (rejection, crash on some phones, a much bigger download)
 | `signing.debug` | a debug keystore is available | warn |
 | `git.secrets` | `*.keystore`, `*.jks`, `export_credentials.cfg` tracked by git | error |
 | `git.godot_cache` | `.godot/` tracked by git | warn |
+| `git.preset_secrets` | release password, alias or script encryption key in plain text in `export_presets.cfg` (values never shown) | warn / error if tracked |
 | `android.sdk` | SDK path from editor settings or `$ANDROID_HOME` exists | error |
 | `android.platform_tools` | `adb` present | error |
 | `android.build_tools` | build-tools with `apksigner` | error |
@@ -44,7 +46,22 @@ will probably hurt you (rejection, crash on some phones, a much bigger download)
 | `textures.dimensions` | textures over 2048 px with no size limit | info |
 | `textures.normal_maps` | VRAM normal maps relying on auto-detected normal compression | info |
 | `audio.wav` | uncompressed WAV over 1 MB | warn |
-| `size.estimate` | imported size vs Play's 500 MB base module and 200 MB mobile-data warning | error / warn |
+| `size.estimate` | imported size vs Play limits: 1.5 GB per asset pack (error), 500 MB base module and 200 MB mobile-data warning (warn) | error / warn |
+
+## gsk verify checks
+
+| Id | Looks at | Severity when it fires |
+| --- | --- | --- |
+| `archive.zip` | zip structure and CRC of every entry | error |
+| `archive.arm64` | `arm64-v8a` native code present | error |
+| `archive.size` | APK size, or the AAB base module (500 MB) and each asset pack (1.5 GB), plus the 200 MB mobile-data warning | error / warn |
+| `archive.page_size` | every 64-bit `.so` has LOAD segments aligned to 16 KB or more (ELF headers) | warn |
+| `archive.native_storage` | large native libraries stored uncompressed in an APK | info |
+| `archive.signature` | `apksigner verify`; debug certificate on a release check | error / info |
+| `archive.align` | `zipalign -c` (with `-P 16` on build-tools 35+) | warn |
+| `archive.target_sdk` | `targetSdkVersion` from the manifest vs Play's requirement | error |
+| `archive.debuggable` | a release check on a debuggable build | error |
+| `archive.bundletool` | `bundletool validate` for AABs (set `BUNDLETOOL` to the jar) | error / info |
 
 ## Where the numbers come from
 

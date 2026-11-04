@@ -54,3 +54,26 @@ def test_eyes_catches_a_regression(real_example: Path, capsys) -> None:  # type:
     assert code == 1 and res["status"] == "changed"
     assert any("no material" in a["message"] for a in res["alerts"])
     assert res["diff"]["regions"]
+
+
+@needs_godot
+def test_capture_script_parses_under_strict_warnings(real_example: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    strict = "\n[debug]\n\n" + "".join(
+        f"gdscript/warnings/{w}=2\n"
+        for w in (
+            "untyped_declaration",
+            "inferred_declaration",
+            "unsafe_property_access",
+            "unsafe_method_access",
+            "unsafe_call_argument",
+            "unsafe_cast",
+            "return_value_discarded",
+            "integer_division",
+        )
+    )
+    with (real_example / "project.godot").open("a", encoding="utf-8") as fh:
+        fh.write(strict)
+    code = main(["eyes", str(real_example), "--json", "--display", "xvfb", "--scene", "res://scenes/diorama.tscn"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["results"][0]["status"] == "pass", data
+    assert code == 0

@@ -53,6 +53,37 @@ def test_configure_writes_editor_settings(tmp_path: Path, capsys) -> None:  # ty
 
 def test_skill_print_and_install(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     assert main(["skill", "print"]) == 0
-    assert "name: godot-ship-kit" in capsys.readouterr().out
+    plain = capsys.readouterr().out
+    assert plain.startswith("# godot-ship-kit") and "name: godot-ship-kit" not in plain
+    assert main(["skill", "print", "--frontmatter"]) == 0
+    assert capsys.readouterr().out.startswith("---\nname: godot-ship-kit")
     assert main(["skill", "install", "--dir", str(tmp_path)]) == 0
     assert (tmp_path / "godot-ship-kit" / "SKILL.md").is_file()
+
+
+def test_json_outputs_are_pure_json(example: Path, toolchain, capsys, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from .conftest import add_fake_imports
+
+    toolchain()
+    add_fake_imports(example, {"ground_albedo.jpg": 3_000_000})
+    for argv in (
+        ["doctor", str(example), "--json"],
+        ["slim", str(example), "--json"],
+        ["slim", str(example), "--json", "--apply"],
+        ["slim", str(example), "--json", "--undo"],
+        ["build", str(example), "--json", "--debug", "--no-verify"],
+        ["build", str(example), "--json", "--debug"],
+    ):
+        main(argv)
+        out = capsys.readouterr().out
+        json.loads(out)  # raises if anything but one JSON document was printed
+
+
+def test_errors_go_to_stderr(example: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("GODOT", "/nonexistent")
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert main(["build", str(example), "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("gsk: Godot not found")

@@ -89,9 +89,12 @@ def test_export_with_fake_godot(example: Path, toolchain, monkeypatch) -> None: 
     assert res.output.is_file() and res.log.is_file()
     with pytest.raises(BuildError, match="APK"):
         export(godot, project, preset, example / "build" / "x.aab")
+    with pytest.raises(BuildError, match="No release keystore") as exc:
+        export(godot, project, preset, example / "build" / "r.apk")  # release without a keystore
+    assert any("--debug" in h for h in exc.value.hints)
     monkeypatch.setenv("FAKE_GODOT_FAIL", "1")
     with pytest.raises(BuildError) as exc:
-        export(godot, project, preset, example / "build" / "y.apk")
+        export(godot, project, preset, example / "build" / "y.apk", release=False)
     assert any("templates" in h for h in exc.value.hints)
 
 
@@ -113,9 +116,25 @@ def test_cli_build_and_verify(example: Path, toolchain, capsys, monkeypatch) -> 
 def test_cli_build_reports_failure(example: Path, toolchain, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     toolchain()
     monkeypatch.setenv("FAKE_GODOT_FAIL", "1")
-    assert main(["build", str(example)]) == 1
+    assert main(["build", str(example), "--debug"]) == 1
     out = capsys.readouterr().out
     assert "Export failed" in out and "hint:" in out
+
+
+def test_release_build_with_env_keystore_and_redacted_log(example: Path, toolchain, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    toolchain()
+    ks = example.parent / "upload.keystore"
+    ks.write_bytes(b"x")
+    monkeypatch.setenv("GODOT_ANDROID_KEYSTORE_RELEASE_PATH", str(ks))
+    monkeypatch.setenv("GODOT_ANDROID_KEYSTORE_RELEASE_USER", "upload")
+    monkeypatch.setenv("GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD", "s3cret-pass")
+    monkeypatch.setenv("FAKE_GODOT_ECHO", "s3cret-pass")
+    assert main(["build", str(example), "--no-verify"]) == 0
+    out = capsys.readouterr().out
+    assert "release keystore from environment" in out
+    log = next((example / ".gsk" / "logs").glob("build-*.log"))
+    assert "s3cret-pass" not in log.read_text() and "<redacted>" in log.read_text()
+    assert oct(log.stat().st_mode & 0o777) == "0o600"
 
 
 def test_aab_requires_gradle_in_cli(example: Path, toolchain, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -126,3 +145,76 @@ def test_aab_requires_gradle_in_cli(example: Path, toolchain, capsys) -> None:  
     )
     assert main(["build", str(example), "-o", str(example / "out.apk")]) == 1
     assert "exports AAB" in capsys.readouterr().out
+
+
+def _elf64(p_align: int) -> bytes:
+    import struct
+
+    phoff, phentsize = 64, 56
+    header = bytearray(64)
+    header[:4] = b"\x7fELF"
+    header[4], header[5] = 2, 1  # 64-bit, little endian
+    struct.pack_into("<Q", header, 0x20, phoff)
+    struct.pack_into("<HH", header, 0x36, phentsize, 2)
+    ph = bytearray(phentsize * 2)
+    struct.pack_into("<I", ph, 0, 1)  # PT_LOAD
+    struct.pack_into("<Q", ph, 0x30, p_align)
+    struct.pack_into("<I", ph, phentsize, 6)  # PT_PHDR, ignored
+    return bytes(header + ph)
+
+
+def test_elf_page_alignment(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert archive.elf_load_alignment(_elf64(0x4000)) == 0x4000
+    assert archive.elf_load_alignment(b"not an elf" * 10) is None
+    for align, expected in ((0x4000, Severity.OK), (0x1000, Severity.WARN)):
+        apk = tmp_path / f"a{align}.apk"
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("lib/arm64-v8a/libgodot_android.so", _elf64(align))
+        assert _checks(archive.inspect(apk))["archive.page_size"] == expected
+
+
+def test_tool_output_parsing(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from .conftest import _exe
+
+    bt = tmp_path / "sdk" / "build-tools" / "35.0.0"
+    _exe(
+        bt / "aapt2",
+        "#!/bin/sh\necho \"package: name='com.x.game' versionCode='7' versionName='1.2'\"\n"
+        "echo \"sdkVersion:'24'\"\necho \"targetSdkVersion:'34'\"\n"
+        "echo \"uses-permission: name='android.permission.INTERNET'\"\necho 'application-debuggable'\n",
+    )
+    _exe(bt / "zipalign", "#!/bin/sh\necho '  lib/arm64-v8a/libx.so (BAD - 4096)'\nexit 1\n")
+    _exe(bt / "apksigner", "#!/bin/sh\nexit 0\n")
+    from godot_ship_kit.env import AndroidToolchain
+
+    tc = AndroidToolchain(None, tmp_path / "sdk", "test", None, "test", None)
+    rep = archive.inspect(_apk(tmp_path / "t.apk"), tc, expect_release=True)
+    c = _checks(rep)
+    assert rep.manifest["package"] == "com.x.game" and rep.manifest["version_code"] == 7
+    assert rep.manifest["permissions"] == ["INTERNET"] and rep.manifest["debuggable"] is True
+    assert c["archive.target_sdk"] == Severity.ERROR
+    assert c["archive.debuggable"] == Severity.ERROR
+    assert c["archive.align"] == Severity.WARN
+
+
+def test_aab_with_bundletool(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from .conftest import _exe
+
+    tool = _exe(
+        tmp_path / "bundletool",
+        '#!/bin/sh\ncase "$1" in\n  validate) exit 0 ;;\n'
+        '  dump) echo \'<manifest package="com.x.game" android:versionCode="3"><uses-sdk android:targetSdkVersion="36"/></manifest>\' ;;\n'
+        "esac\n",
+    )
+    monkeypatch.setenv("BUNDLETOOL", str(tool))
+    aab = tmp_path / "g.aab"
+    with zipfile.ZipFile(aab, "w") as z:
+        z.writestr("base/lib/arm64-v8a/libgodot_android.so", _elf64(0x4000))
+        z.writestr("base/assets/x.bin", b"\0" * 1000)
+        z.writestr("BundleConfig.pb", b"")
+    rep = archive.inspect(aab)
+    c = _checks(rep)
+    assert c["archive.bundletool"] == Severity.OK and c["archive.target_sdk"] == Severity.OK
+    assert rep.manifest["package"] == "com.x.game"
+    assert any(f.check == "archive.size" and "Base module" in f.title for f in rep.findings)

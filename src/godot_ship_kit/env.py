@@ -37,9 +37,16 @@ class GodotBinary:
 
     @property
     def template_dir_name(self) -> str:
-        """Export templates live in a folder named like ``4.6.3.stable``."""
+        """Export templates live in a folder named like ``4.6.3.stable`` (``4.6.3.stable.mono`` for .NET)."""
         m = re.match(r"(\d+\.\d+(?:\.\d+)?\.[a-z0-9]+)", self.version)
-        return m.group(1) if m else self.version
+        name = m.group(1) if m else self.version
+        return name + ".mono" if self.is_mono else name
+
+    @property
+    def settings_file_name(self) -> str:
+        """Godot 4.0-4.2 share ``editor_settings-4.tres``; 4.3+ use one file per minor version."""
+        major, minor = (int(x) for x in self.minor.split("."))
+        return f"editor_settings-{major}.{minor}.tres" if (major, minor) >= (4, 3) else f"editor_settings-{major}.tres"
 
     @property
     def is_mono(self) -> bool:
@@ -119,12 +126,8 @@ def editor_settings_path(godot: GodotBinary | None = None) -> Path | None:
     if not base.is_dir():
         return None
     if godot:
-        exact = base / f"editor_settings-{godot.minor}.tres"
-        if exact.is_file():
-            return exact
-        major = base / f"editor_settings-{godot.minor.split('.')[0]}.tres"
-        if major.is_file():
-            return major
+        exact = base / godot.settings_file_name
+        return exact if exact.is_file() else None
     found = sorted(base.glob("editor_settings-*.tres"), key=lambda p: p.stat().st_mtime, reverse=True)
     return found[0] if found else None
 
@@ -213,8 +216,10 @@ def java_major(java: Path) -> int | None:
 def write_editor_settings(path: Path, values: dict[str, str]) -> None:
     """Set Android-related editor settings, creating the file if needed."""
     if path.is_file():
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as fh:
+            text = fh.read()
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         text = '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n'
-    path.write_text(godot_cfg.set_values(text, "resource", dict(values)), encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(godot_cfg.set_values(text, "resource", dict(values)))
