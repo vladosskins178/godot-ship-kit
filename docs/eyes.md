@@ -10,20 +10,25 @@ comparison works.
 gsk eyes [PROJECT] [--scene SCENE ...] [--device DEVICE ...] [--update]
          [--config FILE] [--output DIR] [--threshold FLOAT]
          [--rendering-method METHOD] [--rendering-driver DRIVER]
-         [--gpu] [--display auto|xvfb|native] [--json]
+         [--gpu] [--display auto|xvfb|native] [--strict] [--json]
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `--scene` | Capture these scenes instead of the shots in `gsk.toml`. `res://` paths or file paths. Repeatable. |
 | `--device` | Device presets or `WIDTHxHEIGHT`. Repeatable. Overrides `devices` in the config. |
-| `--update` | Save the captures as references instead of comparing. |
+| `--update` | Save the captures as references instead of comparing. It saves every shot on every device in this run; narrow it with `--scene` / `--device`. A capture with an error alert is never saved. |
+| `--strict` | Also fail when a shot has no reference yet. Use it in CI, so deleting references cannot turn a check green. |
 | `--rendering-method` | Defaults to the project's **mobile** renderer (`rendering/renderer/rendering_method.mobile`). |
 | `--gpu` | Allow a hardware GPU. By default software rendering is forced (`LIBGL_ALWAYS_SOFTWARE=1`) so results do not depend on the machine. |
 | `--display` | `auto` uses `$DISPLAY` when an X server answers there and falls back to `xvfb-run`; `xvfb` always uses a virtual display; `native` always uses `$DISPLAY` / Wayland. macOS and Windows use their own display unless `xvfb` is asked for. |
 
-Exit codes: `0` everything matched (or was saved), `1` a shot changed or failed,
-`2` usage error (no Godot, no xvfb, bad config).
+Exit codes: `0` everything matched (or was saved), `1` a shot changed or failed (a
+verdict: look at the report), `2` usage error (no Godot, no xvfb, bad config). With
+`--json`, usage errors also print `{"ok": false, "error": ...}`.
+
+On a fresh clone (no `.godot/` folder) `gsk eyes` first runs `godot --headless --import`
+once, because scenes render with missing textures until the project is imported.
 
 ## Devices
 
@@ -51,8 +56,8 @@ references = "tests/eyes"        # relative to the project root
 output = ".gsk/eyes"             # report folder
 threshold = 0.99                 # minimum similarity (0..1)
 max_changed = 0.0005             # maximum share of changed pixels (0..1); 0.0005 is about 1300 px on a 1080x2400 screen
-tolerance = 24                   # per-channel difference (0..255) that counts as "changed"
-region_pixels = 40               # one connected change this big fails the shot (0 = off)
+tolerance = 8                    # per-channel difference (0..255) that counts as "changed"
+region_pixels = 20               # one connected change this big fails the shot (0 = off)
 wait = 1.0                       # default seconds to wait after a scene loads
 boot_seconds = 120               # extra time budget for engine start and shader compiles
 
@@ -88,17 +93,20 @@ loaded scene.
   report.md              short, for agents
   report.json            everything, machine-readable
   logs/<device>.log      full Godot output
+  <device>/capture.gd                the generated capture script for that device
   <device>/<shot>.png                the capture
   <device>/<shot>.json               scene facts (camera, meshes, materials, rigs)
   <device>/<shot>.diff.png           changed pixels in red, regions boxed
   <device>/<shot>.region1.png        reference | current crop of the largest change
-  <device>/<shot>.zoom-<name>.png    full-resolution crop from your zoom list
+  <device>/<shot>.zoom-<name>.png    full-resolution crop of a fixed rect from your zoom list
 tests/eyes/
   .gdignore                          keeps Godot from importing (and shipping) references
   <device>/<shot>.png
 ```
 
-`.gsk/` gets its own `.gitignore`. Commit `tests/eyes/`.
+Each run first deletes the previous capture, facts, diff and crops of the shots it is
+about to take, so nothing stale is left next to the new results. Paths in `report.json`
+and `report.md` are absolute. `.gsk/` gets its own `.gitignore`. Commit `tests/eyes/`.
 
 ## How the comparison works
 
@@ -124,6 +132,8 @@ tests/eyes/
 | Mesh without material | warn | a visible mesh surface with no material, override or surface override |
 | No mesh in view | warn | a camera exists, meshes exist, none intersects the view |
 | Rig not animating | warn | an AnimationPlayer over a Skeleton3D has animations but none is playing and no active AnimationTree drives it |
+| UI off screen | warn | a visible Control sticks out past the screen edge (backgrounds that cover the whole screen are ignored); the outermost one is named, with how many pixels |
+| Capture step failed | error | the scene did not load, an action's node, method or input action does not exist |
 | Tiny meshes | info | a mesh covers under 0.01% of the screen |
 | Engine errors | warn | `ERROR` / `SCRIPT ERROR` lines printed while the shot ran |
 

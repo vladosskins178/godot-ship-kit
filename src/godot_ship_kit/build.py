@@ -64,7 +64,15 @@ class BuildResult:
 
 def preset_format(preset: Preset) -> str:
     gradle = bool(preset.opt("gradle_build/use_gradle_build", False))
-    return "aab" if gradle and int(preset.opt("gradle_build/export_format", 0) or 0) == 1 else "apk"
+    return "aab" if gradle and export_format(preset) == 1 else "apk"
+
+
+def export_format(preset: Preset) -> int:
+    """``gradle_build/export_format``: 0 = APK, 1 = AAB (anything unreadable counts as APK)."""
+    try:
+        return int(preset.opt("gradle_build/export_format", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def default_output(project: GodotProject, preset: Preset, release: bool) -> Path:
@@ -73,7 +81,8 @@ def default_output(project: GodotProject, preset: Preset, release: bool) -> Path
     if raw:
         path = Path(raw)
         path = path if path.is_absolute() else (project.root / path)
-        return path.with_suffix("." + fmt)
+        # Keep debug and release builds apart so one never overwrites the other.
+        return path.with_name(path.stem + ("" if release else "-debug") + "." + fmt)
     version = str(preset.opt("version/name", "") or "").strip() or "dev"
     slug = re.sub(r"[^A-Za-z0-9]+", "-", project.name).strip("-").lower() or "game"
     return project.root / "build" / f"{slug}-{version}-{'release' if release else 'debug'}.{fmt}"
@@ -82,15 +91,23 @@ def default_output(project: GodotProject, preset: Preset, release: bool) -> Path
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|[\x00-\x08\x0b-\x1f\x7f]")
 
 
-def clean_log(text: str) -> str:
-    """Strip terminal escapes and control characters, and mask signing values from the environment."""
+def clean_log(text: str, secrets: list[str] | None = None) -> str:
+    """Strip terminal escapes and control characters, and mask signing values."""
     text = ANSI.sub("", text)
+    values = list(secrets or [])
     for kind in ("RELEASE", "DEBUG"):
         for part in ("PASSWORD", "USER"):
-            value = os.environ.get(f"GODOT_ANDROID_KEYSTORE_{kind}_{part}")
-            if value and len(value) >= 3:
-                text = text.replace(value, "<redacted>")
+            values.append(os.environ.get(f"GODOT_ANDROID_KEYSTORE_{kind}_{part}", ""))
+    for value in sorted({v for v in values if v and len(v) >= 3}, key=len, reverse=True):
+        text = text.replace(value, "<redacted>")
     return text
+
+
+def signing_values(project: GodotProject, preset: Preset) -> list[str]:
+    """Release and debug passwords and aliases from the preset and export credentials (to mask them)."""
+    creds = project.credentials.section(f"preset.{preset.index}.options")
+    keys = [f"keystore/{k}_{f}" for k in ("release", "debug") for f in ("password", "user")]
+    return [str(src.get(k) or "") for src in (preset.options, creds) for k in keys]
 
 
 def release_keystore_source(project: GodotProject, preset: Preset) -> str | None:
@@ -164,13 +181,15 @@ def export(
     before = output.stat().st_mtime if output.exists() else None
     start = time.time()
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, text=True, errors="replace")
+        proc = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, text=True, errors="replace"
+        )
         code, raw = proc.returncode, proc.stdout or ""
     except subprocess.TimeoutExpired as exc:
         code, raw = -1, (exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else exc.stdout or "")
         raw += f"\n[gsk] export timed out after {timeout}s\n"
     elapsed = time.time() - start
-    text = clean_log(raw)
+    text = clean_log(raw, signing_values(project, preset))
     log.write_text("$ " + " ".join(cmd) + "\n\n" + text, encoding="utf-8")
     with contextlib.suppress(OSError):
         log.chmod(0o600)

@@ -10,7 +10,7 @@ from pathlib import Path
 from .runner import EyesRun, ShotResult
 
 STATUS_LABEL = {
-    "pass": "match",
+    "match": "match",
     "changed": "changed",
     "new": "new",
     "updated": "reference saved",
@@ -60,7 +60,7 @@ def render_markdown(run: EyesRun) -> str:
         "",
         f"Godot {run.godot.version}, renderer `{run.rendering_method}`, {run.started}, {run.seconds:.0f}s.",
         "",
-        f"**{c['pass']} match, {c['changed']} changed, {c['new']} new, {c['updated']} saved as reference, {c['error']} errors.**",
+        f"**{c['match']} match, {c['changed']} changed, {c['new']} new, {c['updated']} saved as reference, {c['error']} errors.**",
         "",
         "| Shot | Device | Status | Similarity | Changed pixels | Alerts |",
         "| --- | --- | --- | --- | --- | --- |",
@@ -130,7 +130,7 @@ h1{font-size:30px;line-height:1.2;margin:10px 0 6px;letter-spacing:-.01em}
 .meta{color:var(--muted);font-size:13.5px}
 .summary{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 6px}
 .pill{border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600;border:1px solid transparent}
-.pill.pass{background:var(--pass-bg);color:var(--pass)}.pill.changed,.pill.error{background:var(--chg-bg);color:var(--chg)}
+.pill.match{background:var(--pass-bg);color:var(--pass)}.pill.changed,.pill.error{background:var(--chg-bg);color:var(--chg)}
 .pill.new,.pill.updated{background:var(--new-bg);color:var(--new)}.pill.zero{background:transparent;color:var(--muted);border-color:var(--line)}
 nav{max-width:1280px;margin:0 auto;padding:8px 24px 0;display:flex;gap:6px;flex-wrap:wrap}
 nav button{font:inherit;font-size:13.5px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 14px;border-radius:8px;cursor:pointer}
@@ -274,7 +274,7 @@ def render_html(run: EyesRun) -> str:
     base = run.config.output
     c = run.counts()
     pills = "".join(
-        f'<span class="pill {k if v else "zero"}">{v} {STATUS_LABEL[k]}</span>' for k, v in c.items() if v or k in ("pass", "changed")
+        f'<span class="pill {k if v else "zero"}">{v} {STATUS_LABEL[k]}</span>' for k, v in c.items() if v or k in ("match", "changed")
     )
     devices = ", ".join(run.config.devices)
     cards = "\n".join(_card(r, base) for r in run.results)

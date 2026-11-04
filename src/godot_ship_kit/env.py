@@ -77,6 +77,7 @@ def _godot_version(path: str) -> str | None:
     try:
         out = subprocess.run(
             [path, "--headless", "--version"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,
@@ -203,7 +204,7 @@ def android_toolchain(godot: GodotBinary | None = None) -> AndroidToolchain:
 
 def java_major(java: Path) -> int | None:
     try:
-        out = subprocess.run([str(java), "-version"], capture_output=True, text=True, timeout=30)
+        out = subprocess.run([str(java), "-version"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     m = re.search(r'version "(\d+)(?:\.(\d+))?', out.stderr + out.stdout)

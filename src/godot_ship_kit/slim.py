@@ -458,7 +458,13 @@ def list_backups(project: GodotProject) -> list[Path]:
     root = backups_dir(project)
     if not root.is_dir():
         return []
-    return sorted(p for p in root.iterdir() if (p / "manifest.json").is_file() and not p.name.endswith(".restored"))
+    found = [p for p in root.iterdir() if (p / "manifest.json").is_file() and not p.name.endswith(".restored")]
+
+    def order(p: Path) -> tuple[str, int]:  # 20261104-101500-10 sorts after -2
+        stamp, _, n = p.name.partition("-")[2].partition("-")
+        return p.name.split("-")[0] + stamp, int(n) if n.isdigit() else 1
+
+    return sorted(found, key=order)
 
 
 def undo(project: GodotProject, name: str | None = None) -> Path | None:
@@ -485,6 +491,8 @@ def undo(project: GodotProject, name: str | None = None) -> Path | None:
             or not dst.resolve().is_relative_to(root)
         ):
             raise ValueError(f"Refusing to restore {rel!r} from {target.name}: not an .import file inside the project")
+        if not src.is_file():
+            raise ValueError(f"Backup {target.name} is incomplete: {rel} is missing. Nothing was restored.")
         pairs.append((src, dst))
     for src, dst in pairs:
         shutil.copy2(src, dst)
@@ -497,6 +505,7 @@ def reimport(godot: str, project: GodotProject, timeout: int = 3600) -> subproce
     """Re-import changed assets headlessly so ``.godot/imported`` reflects the new settings."""
     return subprocess.run(
         [godot, "--headless", "--path", str(project.root), "--import"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=timeout,

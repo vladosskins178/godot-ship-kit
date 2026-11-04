@@ -68,7 +68,7 @@ func _open_scene(shot_name: String, scene_path: String, wait: float) -> bool:
 	if scene_path != "":
 		var err: Error = change_scene_to_file(scene_path)
 		if err != OK:
-			printerr(MARK, " cannot load scene ", scene_path, " (error ", err, ")")
+			printerr(MARK, " ERROR cannot load scene ", scene_path, " (error ", err, ")")
 			print(MARK, " END ", shot_name)
 			return false
 	await process_frame
@@ -82,7 +82,7 @@ func _save(shot_name: String, scene_path: String) -> bool:
 	await RenderingServer.frame_post_draw
 	var img: Image = root.get_texture().get_image()
 	if img == null:
-		printerr(MARK, " viewport returned no image for ", shot_name)
+		printerr(MARK, " ERROR viewport returned no image for ", shot_name)
 		print(MARK, " END ", shot_name)
 		return false
 	var _saved: Error = img.save_png(OUT_DIR.path_join(shot_name + ".png"))
@@ -134,6 +134,9 @@ func _tap(x: float, y: float, then_wait: float) -> void:
 
 
 func _press(action: String, then_wait: float) -> void:
+	if not InputMap.has_action(StringName(action)):
+		printerr(MARK, " ERROR action ", action, " is not in the Input Map")
+		return
 	for pressed: bool in [true, false]:
 		var ev: InputEventAction = InputEventAction.new()
 		ev.action = StringName(action)
@@ -146,7 +149,10 @@ func _press(action: String, then_wait: float) -> void:
 func _call_node(path: String, method: String, args: Array) -> void:
 	var target: Node = _node(path)
 	if target == null:
-		printerr(MARK, " action target not found: ", path)
+		printerr(MARK, " ERROR action target not found: ", path)
+		return
+	if not target.has_method(StringName(method)):
+		printerr(MARK, " ERROR ", path, " has no method ", method)
 		return
 	var _result: Variant = target.callv(StringName(method), args)
 	await process_frame
@@ -155,7 +161,7 @@ func _call_node(path: String, method: String, args: Array) -> void:
 func _set_node(path: String, property: String, value: Variant) -> void:
 	var target: Node = _node(path)
 	if target == null:
-		printerr(MARK, " action target not found: ", path)
+		printerr(MARK, " ERROR action target not found: ", path)
 		return
 	target.set(StringName(property), value)
 	await process_frame
@@ -173,6 +179,7 @@ func _scene_facts() -> Dictionary:
 	var tiny: Array[String] = []
 	var no_material: Array[String] = []
 	var idle_skeletons: Array[String] = []
+	var overflowing: Array[String] = []
 	var scene: Node = current_scene
 	if scene != null:
 		var cam: Camera3D = root.get_camera_3d()
@@ -205,6 +212,11 @@ func _scene_facts() -> Dictionary:
 			var ap: AnimationPlayer = n as AnimationPlayer
 			if ap != null and _is_idle_rig(ap):
 				idle_skeletons.append(str(scene.get_path_to(ap)))
+			var ctl: Control = n as Control
+			if ctl != null and ctl.is_visible_in_tree():
+				var note: String = _overflow(ctl)
+				if note != "":
+					overflowing.append(str(scene.get_path_to(ctl)) + " " + note)
 	return {
 		"has_3d": has_3d,
 		"camera_3d": camera_path,
@@ -214,7 +226,35 @@ func _scene_facts() -> Dictionary:
 		"tiny": _limited(tiny),
 		"no_material": _limited(no_material),
 		"idle_skeletons": _limited(idle_skeletons),
+		"overflowing": _limited(overflowing),
 	}
+
+
+# A Control that sticks out of the screen while not covering it (backgrounds are
+# usually larger than the screen on purpose). Only the outermost offender is reported.
+func _overflow(ctl: Control) -> String:
+	var view: Rect2 = root.get_visible_rect()
+	var r: Rect2 = ctl.get_global_rect()
+	if r.size.x <= 0.0 or r.size.y <= 0.0 or not r.intersects(view):
+		return ""
+	if r.size.x >= view.size.x and r.size.y >= view.size.y:
+		return ""
+	var parent: Control = ctl.get_parent() as Control
+	if parent != null and parent.is_visible_in_tree() and _overflow(parent) != "":
+		return ""
+	var sides: Array[String] = []
+	var margin: float = 2.0
+	if r.position.x < view.position.x - margin:
+		sides.append("left %d px" % int(view.position.x - r.position.x))
+	if r.end.x > view.end.x + margin:
+		sides.append("right %d px" % int(r.end.x - view.end.x))
+	if r.position.y < view.position.y - margin:
+		sides.append("top %d px" % int(view.position.y - r.position.y))
+	if r.end.y > view.end.y + margin:
+		sides.append("bottom %d px" % int(r.end.y - view.end.y))
+	if sides.is_empty():
+		return ""
+	return "(past the " + ", ".join(sides) + ")"
 
 
 func _limited(items: Array[String]) -> Array[String]:

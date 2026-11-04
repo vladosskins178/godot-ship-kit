@@ -60,3 +60,19 @@ jobs:
         with:
           name: eyes-report
           path: examples/hello-ship/.gsk/eyes
+
+  capture-compat:
+    name: Capture script on Godot ${{ matrix.godot }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        godot: ["4.2.2", "4.4.1", "4.5.1"]
+    steps:
+      - uses: actions/checkout@v4
+      # References are made with 4.6, so older versions only have to capture cleanly:
+      # --update exits non-zero if any shot fails or the capture script does not load.
+      - uses: ./
+        with:
+          godot-version: ${{ matrix.godot }}
+          args: eyes examples/hello-ship --display xvfb --update

@@ -21,16 +21,20 @@ uvx --from "godot-ship-kit[eyes] @ git+https://github.com/vladosskins178/godot-s
 Point it at Godot with `export GODOT=/path/to/godot` if `godot` is not on PATH.
 `doctor`, `slim`, `build` and `eyes` take the project folder (default: the current
 folder) and `--json`; `verify` takes an APK/AAB path. Errors go to stderr, so `--json`
-output on stdout is always one JSON document. If your client supports MCP, `gsk mcp`
-offers the same commands as tools, and `gsk_eyes` returns the change crops as images.
+output on stdout is always one JSON document. Exit codes: `0` ok, `1` a verdict that
+needs you (failed checks, changed shots: read the report), `2` usage error. If your
+client supports MCP, `gsk mcp` offers the same commands as tools, and `gsk_eyes` returns
+a one-line verdict plus the change crops as images.
 
 ## The loop
 
 1. **`gsk doctor`** before any export. Fix every `FAIL`, read every `warn`.
    Each finding has a `fix:` line with the exact setting or command.
-2. **`gsk slim`** when the build is big. Apply with `gsk slim --apply` (safe changes);
-   use `--aggressive` only after telling the user which quality trade it makes.
-   Add `--reimport` to re-import and see the new size.
+2. **`gsk slim`** when the build is big. The safe tier (`--apply`) VRAM-compresses 3D
+   textures: big GPU memory and load-time win, but the download can grow. The download
+   shrinks with the review tier (`--apply --aggressive`: size caps, Lossy WebP, QOA);
+   tell the user which quality trade it makes and check the result with `gsk eyes`.
+   Add `--reimport` to measure the real new size.
 3. **`gsk build --debug`** for a test APK, **`gsk build`** for release (needs the keystore
    variables below; it stops early if they are missing). Verification runs automatically.
    Gradle/AAB presets need the build template once: `gsk build --install-template`.
@@ -45,11 +49,14 @@ gsk eyes --scene res://ui/shop.tscn --device phone --device tablet
 gsk eyes --update                          # save current captures as references
 ```
 
+A fresh clone gets imported automatically on the first run (it takes a moment).
 Then read `.gsk/eyes/report.md`. Per shot it lists the status (`match`, `changed`, `new`,
 `error`), similarity, share of changed pixels, the changed regions as frame fractions,
-and paths to the images. Full-size phone captures get downscaled when you view them, so
-small text becomes unreadable: **open the zoom and region crops** (`*.zoom-*.png`,
-`*.region1.png`) to check text clipping, alignment and details at full resolution.
+and absolute paths to the images. Full-size phone captures get downscaled when you view
+them, so small text becomes unreadable: **open the region crops** (`*.region1.png`:
+reference left, current right, around the biggest change) at full resolution. Zoom crops
+(`*.zoom-<name>.png`) are fixed rectangles from `gsk.toml`; their edges can cut through
+text, so do not read a cut at the crop edge as clipping.
 
 Alerts to act on:
 
@@ -57,12 +64,17 @@ Alerts to act on:
 - `no material and render plain white`: a mesh lost its material or texture.
 - `nothing playing (bind/T-pose)`: a rigged model's AnimationPlayer is idle.
 - `No visible mesh is inside the camera view`: the camera points away, or the model is tiny.
+- `UI runs off the screen: <node> (past the left 11 px ...)`: a Control is wider or taller
+  than the screen on that device. Common after bigger fonts or longer text.
+- `Capture step failed`: a shot's scene, node, method or input action does not exist.
 - `engine error line(s)`: script errors while the scene ran. Fix those first.
 
 Rules:
 
 - Run `gsk eyes --update` only after you have looked at the new captures and the change
-  is intended. Never save a regression as the reference to make a check pass.
+  is intended. Never save a regression as the reference to make a check pass. `--update`
+  saves every shot on every device of that run, so limit it with `--scene` / `--device`
+  when only some shots should change. Use `--strict` in CI.
 - Shots live in `gsk.toml` (`[[eyes.shot]]` with `scene`, `wait`, `actions`, `zoom`,
   `devices`). Actions: `{ press = "ui_accept" }`, `{ tap = [0.5, 0.8] }` (fractions of
   the screen), `{ node = "Player", call = "jump" }`,

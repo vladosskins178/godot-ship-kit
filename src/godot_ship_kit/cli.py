@@ -26,9 +26,14 @@ def _open_project(path: str) -> GodotProject:
     return GodotProject.open(path)
 
 
+_JSON_MODE = False
+
+
 def _fail(message: str, code: int = EXIT_USAGE) -> int:
-    """Errors go to stderr with a ``gsk:`` prefix so --json output on stdout stays clean."""
+    """Errors go to stderr with a ``gsk:`` prefix; with --json, stdout also gets an error object."""
     sys.stderr.write(f"gsk: {message}\n")
+    if _JSON_MODE:
+        dump_json({"ok": False, "error": message})
     return code
 
 
@@ -360,10 +365,10 @@ def cmd_eyes(args: argparse.Namespace) -> int:
         payload["reports"] = {k: str(v) for k, v in paths.items()}
         dump_json(payload)
     else:
-        colors = {"pass": style.green, "changed": style.red, "error": style.red, "new": style.blue, "updated": style.blue}
+        colors = {"match": style.green, "changed": style.red, "error": style.red, "new": style.blue, "updated": style.blue}
         out.write("\n")
         for r in result.results:
-            label = {"pass": "match", "updated": "saved"}.get(r.status, r.status)
+            label = {"updated": "saved"}.get(r.status, r.status)
             metric = f"similarity {r.diff.similarity:.4f}, {r.diff.changed_ratio:.2%} px changed" if r.diff else ""
             out.write(f"  {colors[r.status](f'{label:>7}')}  {r.shot} · {r.device}  {style.dim(metric)}\n")
             for a in r.alerts:
@@ -374,12 +379,16 @@ def cmd_eyes(args: argparse.Namespace) -> int:
                     out.write(style.dim(f"             {line[:160]}") + "\n")
         c = result.counts()
         out.write(
-            f"\n  {c['pass']} match, {c['changed']} changed, {c['new']} new, {c['updated']} saved, "
+            f"\n  {c['match']} match, {c['changed']} changed, {c['new']} new, {c['updated']} saved, "
             f"{_plural(c['error'], 'error')} in {result.seconds:.0f}s\n"
         )
         out.write(f"  Report: {paths['html']}\n  For agents: {paths['markdown']}\n")
         if c["new"] and not args.update:
             out.write(style.dim("  No reference yet for new shots. Check them, then run `gsk eyes --update` to save references.") + "\n")
+    if args.strict and result.counts()["new"]:
+        if not args.json:
+            sys.stderr.write("gsk: --strict: shots without a reference count as failures.\n")
+        return EXIT_FAIL
     return EXIT_FAIL if result.failed else EXIT_OK
 
 
@@ -535,16 +544,17 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--rendering-method", help="override renderer (default: the project's mobile renderer)")
     e.add_argument("--rendering-driver", help="override driver, e.g. opengl3 or vulkan")
     e.add_argument("--gpu", action="store_true", help="allow hardware GPU instead of forcing software rendering")
+    e.add_argument("--strict", action="store_true", help="also fail when a shot has no reference yet (use in CI)")
     e.add_argument(
         "--display",
         choices=["auto", "xvfb", "native"],
         default="auto",
-        help="auto: use $DISPLAY if reachable, else xvfb-run; xvfb: always a virtual display",
+        help="auto: $DISPLAY if reachable, else xvfb-run; xvfb: always a virtual display; native: always $DISPLAY/Wayland",
     )
     e.set_defaults(func=cmd_eyes)
 
     c = sub.add_parser("play-checklist", help="Play Console launch checklist, filled in from the project")
-    c.add_argument("project", nargs="?", default=".")
+    c.add_argument("project", nargs="?", default=".", help="Godot project folder (default: current folder)")
     c.add_argument("-o", "--output", help="write to a file instead of stdout")
     c.set_defaults(func=cmd_checklist)
 
@@ -562,7 +572,10 @@ def build_parser() -> argparse.ArgumentParser:
     sk.add_argument("--frontmatter", action="store_true", help="print: keep the YAML header (for skill loaders)")
     sk.set_defaults(func=cmd_skill)
 
-    m = sub.add_parser("mcp", help="run as an MCP server over stdio (tools: doctor, slim, build, verify, eyes, checklist)")
+    m = sub.add_parser(
+        "mcp",
+        help="run as an MCP server over stdio (gsk_doctor, gsk_slim, gsk_build, gsk_verify, gsk_eyes, gsk_play_checklist)",
+    )
     m.set_defaults(func=cmd_mcp)
     return p
 
@@ -573,11 +586,12 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "func", None):
         parser.print_help()
         return EXIT_USAGE
+    global _JSON_MODE
+    _JSON_MODE = bool(getattr(args, "json", False))
     try:
         return int(args.func(args))
     except ProjectError as exc:
-        sys.stderr.write(f"gsk: {exc}\n")
-        return EXIT_USAGE
+        return _fail(str(exc))
     except KeyboardInterrupt:
         return 130
 

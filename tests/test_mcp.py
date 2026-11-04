@@ -70,9 +70,43 @@ def test_eyes_images_are_attached(tmp_path: Path) -> None:
                 "diff_image": "phone/menu.diff.png",
                 "alerts": [],
             },
-            {"shot": "ok", "device": "phone", "status": "pass", "image": "phone/ok.png", "alerts": []},
+            {"shot": "ok", "device": "phone", "status": "match", "image": "phone/ok.png", "alerts": []},
         ],
     }
     blocks = mcp._eyes_images(payload)
     images = [b for b in blocks if b["type"] == "image"]
     assert len(images) == 2 and images[0]["mimeType"] == "image/png"
+
+
+def test_hostile_arguments_do_not_inject_or_crash(example: Path, toolchain, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    toolchain()
+    marker = tmp_path / "ran"
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    evil.chmod(0o755)
+    calls = [
+        {"name": "gsk_doctor", "arguments": {"project": f"--godot={evil}"}},
+        {"name": "gsk_doctor", "arguments": ["x"]},
+        {"name": "gsk_doctor", "arguments": {"project": 5}},
+        {"name": "gsk_eyes", "arguments": {"project": str(example), "scenes": "res://x.tscn"}},
+        {"name": "gsk_slim", "arguments": {"project": str(example), "apply": "yes"}},
+    ]
+    msgs = [{"jsonrpc": "2.0", "id": i, "method": "tools/call", "params": c} for i, c in enumerate(calls, 1)]
+    msgs.append({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": ["not", "an", "object"]})
+    msgs.append({"jsonrpc": "2.0", "id": 100, "result": {}})  # a response sent to us: ignored
+    msgs.append({"jsonrpc": "2.0", "id": 101, "method": "ping"})
+    replies = _session(*msgs)
+    assert not marker.exists()
+    by_id = {r.get("id"): r for r in replies}
+    for i in range(1, 6):
+        assert by_id[i]["result"]["isError"] is True, by_id[i]
+    assert by_id[99]["error"]["code"] == -32602
+    assert 100 not in by_id
+    assert by_id[101]["result"] == {}
+
+
+def test_bad_gsk_toml_is_a_tool_error_not_a_crash(example: Path, toolchain) -> None:  # type: ignore[no-untyped-def]
+    toolchain()
+    (example / "gsk.toml").write_text("[eyes\nbroken")
+    reply = mcp.call_tool("gsk_eyes", {"project": str(example)})
+    assert reply["isError"] is True and "gsk.toml" in reply["content"][0]["text"]

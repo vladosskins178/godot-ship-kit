@@ -10,12 +10,12 @@
   <a href="https://github.com/vladosskins178/godot-ship-kit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/vladosskins178/godot-ship-kit/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg">
-  <img alt="Godot 4" src="https://img.shields.io/badge/Godot-4.x-478CBF.svg">
+  <img alt="Godot 4.2 to 4.6" src="https://img.shields.io/badge/Godot-4.2%E2%80%934.6-478CBF.svg">
   <img alt="Agent skill and MCP" src="https://img.shields.io/badge/agents-skill%20%7C%20MCP-8A63D2.svg">
 </p>
 
 <p align="center">
-  <img src="docs/img/eyes-agent-loop.gif" width="800" alt="A coding agent restyles a button, runs gsk eyes, gets 'changed', opens the region crop, sees the label became invisible, fixes it and gets 'match'">
+  <img src="docs/img/eyes-agent-loop.gif" width="800" alt="Illustration of the loop with real gsk output: a restyled button, gsk eyes reports changed, the region crop shows the label became invisible, the fix, then match">
 </p>
 
 ---
@@ -95,12 +95,15 @@ Each capture is then compared with its reference:
   **changed pixels** (per-pixel difference above a tolerance) and the **largest connected
   change**, so a single wrong digit in a price fails the shot even though it barely moves
   the frame-wide numbers.
+- **UI off screen**: any Control that sticks out past the screen edge on that device is
+  named, with the overflow in pixels.
 - **Changed regions** are boxed in a diff image, listed as frame fractions, and saved as
   full-resolution *reference | current* crops.
 - **Alerts** catch the classic silent failures: a black frame, a flat frame, a mesh with
   no material (renders plain white), a 3D scene without a current camera, nothing in
-  view, a rigged model whose animations are not playing (T-pose), and engine or script
-  errors raised while the scene ran.
+  view, a rigged model whose animations are not playing (T-pose), shot actions that
+  point at missing nodes, and engine or script errors raised while the scene ran.
+  A capture with an error alert is never saved as a reference.
 
 <p align="center">
   <img src="docs/img/eyes-report.png" width="560" alt="gsk eyes HTML report with a reference/current slider, metrics and zoom crops">
@@ -137,12 +140,12 @@ actions = [{ tap = [0.5, 0.62] }, { wait = 0.5 }, { node = "Shop", call = "selec
 Full reference: [docs/eyes.md](docs/eyes.md).
 
 Software rendering is deterministic, which is what makes reference images work: the
-sample project renders identical captures run after run, on this machine and in a fresh
-Ubuntu 24.04 container with the official Godot download. References belong to a Godot
+sample project renders identical captures run after run, on the author's machine and in
+a fresh Ubuntu 24.04 container with the official Godot download. References belong to a Godot
 version (text rasterisation changes between releases), so regenerate them when you
 upgrade. Software rendering shows layout, colour, composition and missing assets; it
-does not show real-device performance. The capture script is checked against Godot 4.2,
-4.4, 4.5 and 4.6, and against projects that treat untyped or unsafe GDScript as errors.
+does not show real-device performance. CI runs the capture script on Godot 4.2, 4.4, 4.5
+and 4.6, and against a project that treats untyped or unsafe GDScript as errors.
 
 ## gsk doctor
 
@@ -173,6 +176,10 @@ with its source and the date it was checked. Full list: [docs/checks.md](docs/ch
 ## gsk slim
 
 <p align="center"><img src="docs/img/slim.png" width="820" alt="gsk slim output"></p>
+
+On the tiny sample the safe tier makes the download slightly bigger and the GPU memory
+much smaller: one smooth JPEG compresses better as Lossless than as ETC2. On real games
+with many detailed model textures it usually shrinks both, see the numbers below.
 
 The size of your PNG does not matter. What ships is the copy Godot makes in
 `.godot/imported`, and its size comes from the `.import` settings: a 600 KB JPEG imported
@@ -250,21 +257,24 @@ to read the zoom crops before judging text, never to save a regression as a refe
 and to keep signing secrets in environment variables.
 
 **MCP** (any client that speaks the Model Context Protocol): `gsk mcp` serves the commands
-as tools over stdio. `gsk_eyes` returns the verdict as JSON plus the changed-region crops
-and diffs as images, so the model sees the change without opening files.
+as tools over stdio. `gsk_eyes` returns a one-line verdict, the full JSON, and the
+changed-region crops and diffs as images, so the model sees the change without opening files.
 
 ```bash
-claude mcp add gsk -- gsk mcp                  # Claude Code
+claude mcp add gsk -e GODOT=/path/to/godot -- gsk mcp      # Claude Code
 ```
 
 ```json
-{ "mcpServers": { "gsk": { "command": "gsk", "args": ["mcp"], "env": { "GODOT": "/path/to/godot" } } } }
+{ "mcpServers": { "gsk": { "command": "/absolute/path/to/gsk", "args": ["mcp"], "env": { "GODOT": "/path/to/godot" } } } }
 ```
+
+Desktop clients often start servers without your shell's `PATH`, so use the absolute path
+from `which gsk` there.
 
 ## How it fits with other Godot agent tools
 
-Editor bridges such as godot-mcp drive a running Godot editor: create nodes, run the
-project, read its output. That is the right tool while building a game. gsk covers the
+Editor bridges such as godot-mcp launch or drive Godot to create nodes, run the project
+and read its output. That is the right kind of tool while building a game. gsk covers the
 part after it and needs neither an editor nor a GPU: checking a project against Android
 and Play requirements, cutting its size, producing a signed and verified AAB, and
 comparing what scenes look like on phone screens against approved references, in CI or
@@ -278,8 +288,8 @@ gsk and the software-rendering packages, and runs a gsk command:
 ```yaml
 - uses: vladosskins178/godot-ship-kit@v0
   with:
-    args: eyes --display xvfb        # or: doctor --strict, slim, build --debug
-    godot-version: "4.6.3"
+    args: eyes --display xvfb --strict   # or: doctor --strict, slim, build --debug
+    godot-version: "4.6.3"               # export-templates: "true" for gsk build
 - uses: actions/upload-artifact@v4
   if: always()
   with:
@@ -287,8 +297,9 @@ gsk and the software-rendering packages, and runs a gsk command:
     path: .gsk/eyes
 ```
 
-This repository's own [CI](.github/workflows/ci.yml) uses the action on the sample
-project. [docs/ci.md](docs/ci.md) has a workflow that builds a signed AAB from repository
+`gsk eyes` imports a fresh checkout by itself; `--strict` makes a missing reference fail
+the job. This repository's own [CI](.github/workflows/ci.yml) uses the action on the sample
+project, including on Godot 4.2, 4.4 and 4.5. [docs/ci.md](docs/ci.md) has a workflow that builds a signed AAB from repository
 secrets.
 
 ## Requirements and limits

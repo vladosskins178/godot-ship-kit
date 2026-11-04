@@ -106,35 +106,67 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+class ArgumentError(ValueError):
+    pass
+
+
+def _s(a: dict[str, Any], key: str, required: bool = False) -> str | None:
+    v = a.get(key)
+    if v is None:
+        if required:
+            raise ArgumentError(f"missing argument '{key}'")
+        return None
+    if not isinstance(v, str) or not v.strip():
+        raise ArgumentError(f"'{key}' must be a non-empty string")
+    return v
+
+
+def _flag(a: dict[str, Any], key: str) -> bool:
+    v = a.get(key, False)
+    if not isinstance(v, bool):
+        raise ArgumentError(f"'{key}' must be true or false")
+    return v
+
+
+def _strings(a: dict[str, Any], key: str) -> list[str]:
+    v = a.get(key) or []
+    if not isinstance(v, list) or not all(isinstance(x, str) and x for x in v):
+        raise ArgumentError(f"'{key}' must be a list of strings")
+    return v
+
+
+def _opt(flag: str, value: str | None) -> list[str]:
+    # "--flag=value" keeps values that start with "-" from being read as options.
+    return [f"{flag}={value}"] if value is not None else []
+
+
 def _argv(name: str, a: dict[str, Any]) -> list[str]:
+    """Translate tool arguments into a gsk command line. Paths go after "--"."""
     if name == "gsk_doctor":
-        return ["doctor", a["project"], "--json", *(["--preset", a["preset"]] if a.get("preset") else [])]
+        return ["doctor", "--json", *_opt("--preset", _s(a, "preset")), "--", str(_s(a, "project", True))]
     if name == "gsk_slim":
-        flags = [f"--{k}" for k in ("apply", "aggressive", "reimport") if a.get(k)]
-        return ["slim", a["project"], "--json", *flags]
+        flags = [f"--{k}" for k in ("apply", "aggressive", "reimport") if _flag(a, k)]
+        return ["slim", "--json", *flags, "--", str(_s(a, "project", True))]
     if name == "gsk_build":
-        argv = ["build", a["project"], "--json"]
-        if a.get("debug"):
+        argv = ["build", "--json"]
+        if _flag(a, "debug"):
             argv.append("--debug")
-        if a.get("preset"):
-            argv += ["--preset", a["preset"]]
-        if a.get("output"):
-            argv += ["-o", a["output"]]
-        return argv
+        argv += _opt("--preset", _s(a, "preset")) + _opt("--output", _s(a, "output"))
+        return [*argv, "--", str(_s(a, "project", True))]
     if name == "gsk_verify":
-        return ["verify", a["file"], "--json", *(["--project", a["project"]] if a.get("project") else [])]
+        return ["verify", "--json", *_opt("--project", _s(a, "project")), "--", str(_s(a, "file", True))]
     if name == "gsk_eyes":
-        argv = ["eyes", a["project"], "--json"]
-        for s in a.get("scenes") or []:
-            argv += ["--scene", s]
-        for d in a.get("devices") or []:
-            argv += ["--device", d]
-        if a.get("update"):
+        argv = ["eyes", "--json"]
+        for scene in _strings(a, "scenes"):
+            argv += _opt("--scene", scene)
+        for device in _strings(a, "devices"):
+            argv += _opt("--device", device)
+        if _flag(a, "update"):
             argv.append("--update")
-        return argv
+        return [*argv, "--", str(_s(a, "project", True))]
     if name == "gsk_play_checklist":
-        return ["play-checklist", a["project"]]
-    raise KeyError(name)
+        return ["play-checklist", "--", str(_s(a, "project", True))]
+    raise ArgumentError(f"unknown tool {name}")
 
 
 def _image_block(path: Path) -> dict[str, Any] | None:
@@ -154,7 +186,7 @@ def _image_block(path: Path) -> dict[str, Any] | None:
 
 
 def _eyes_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    base = Path(str(payload.get("output_dir", "")))
+    base = Path(str(payload.get("output_dir", "")))  # paths in the payload are absolute; joining keeps them
     picks: list[tuple[str, Path]] = []
     for r in payload.get("results", []):
         label = f"{r.get('shot')} on {r.get('device')} ({r.get('status')})"
@@ -166,34 +198,59 @@ def _eyes_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if r.get("image") and (r.get("status") in ("new", "error") or alerted):
             picks.append((label, base / r["image"]))
     blocks: list[dict[str, Any]] = []
-    for label, path in picks[:MAX_IMAGES]:
+    seen: set[str] = set()
+    for label, path in picks:
+        if len(seen) >= MAX_IMAGES:
+            break
         img = _image_block(path)
-        if img:
-            blocks += [{"type": "text", "text": f"{label}: {path.name}"}, img]
+        if img and img["data"] not in seen:  # identical captures from different shots are sent once
+            seen.add(img["data"])
+            blocks += [{"type": "text", "text": f"{label}: {path}"}, img]
     return blocks
 
 
-def call_tool(name: str, arguments: dict[str, Any], runner: Callable[[list[str]], int] | None = None) -> dict[str, Any]:
+def _eyes_summary(payload: dict[str, Any]) -> str:
+    """One readable verdict before the JSON: counts, then each shot that needs a look."""
+    c = payload.get("counts", {})
+    lines = [
+        f"{c.get('match', 0)} match, {c.get('changed', 0)} changed, {c.get('new', 0)} new, "
+        f"{c.get('updated', 0)} saved, {c.get('error', 0)} error(s). Full report: {payload.get('output_dir', '')}/report.md"
+    ]
+    for r in payload.get("results", []):
+        alerts = [a["message"].splitlines()[0] for a in r.get("alerts", []) if a.get("level") in ("warn", "error")]
+        if r.get("status") != "match" or alerts:
+            lines.append(f"- {r.get('shot')} on {r.get('device')}: {r.get('status')}" + "".join(f"; {a}" for a in alerts))
+    return "\n".join(lines)
+
+
+def call_tool(name: str, arguments: Any, runner: Callable[[list[str]], int] | None = None) -> dict[str, Any]:
     from .cli import main
 
     run = runner or main
     try:
+        if not isinstance(arguments, dict):
+            raise ArgumentError("arguments must be an object")
         argv = _argv(name, arguments)
-    except KeyError as exc:
-        return {"content": [{"type": "text", "text": f"Missing or unknown argument: {exc}"}], "isError": True}
+    except ArgumentError as exc:
+        return {"content": [{"type": "text", "text": f"Invalid arguments: {exc}"}], "isError": True}
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             code = run(argv)
         except SystemExit as exc:
-            code = int(exc.code or 0)
+            code = exc.code if isinstance(exc.code, int) else 2
+        except Exception as exc:  # a tool failure must never take the server down
+            err.write(f"gsk: internal error: {type(exc).__name__}: {exc}\n")
+            code = 2
     text = out.getvalue().strip() or err.getvalue().strip()
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if err.getvalue().strip() and out.getvalue().strip():
         content.append({"type": "text", "text": err.getvalue().strip()})
     if name == "gsk_eyes" and out.getvalue().strip():
-        with contextlib.suppress(ValueError):
-            content += _eyes_images(json.loads(out.getvalue()))
+        with contextlib.suppress(ValueError, TypeError, KeyError, AttributeError):
+            payload = json.loads(out.getvalue())
+            if "results" in payload:
+                content = [{"type": "text", "text": _eyes_summary(payload)}, *content, *_eyes_images(payload)]
     # Exit code 1 is a verdict (checks failed, shots changed), not a tool failure.
     return {"content": content, "isError": code == 2}
 
@@ -209,11 +266,14 @@ def _reply(stream: TextIO, msg_id: Any, result: Any = None, error: dict[str, Any
 
 
 def handle(message: dict[str, Any], stream: TextIO) -> None:
-    method = message.get("method", "")
+    method = message.get("method")
     msg_id = message.get("id")
-    if msg_id is None:  # a notification, e.g. notifications/initialized
+    if msg_id is None or not isinstance(method, str):  # notifications, and responses to us
         return
     params = message.get("params") or {}
+    if not isinstance(params, dict):
+        _reply(stream, msg_id, error={"code": -32602, "message": "params must be an object"})
+        return
     if method == "initialize":
         requested = params.get("protocolVersion")
         version = requested if requested in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
@@ -253,5 +313,10 @@ def serve(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             _reply(out, None, error={"code": -32700, "message": "Parse error"})
             continue
         if isinstance(message, dict):
-            handle(message, out)
+            try:
+                handle(message, out)
+            except Exception as exc:  # keep serving after an unexpected error
+                sys.stderr.write(f"gsk mcp: {type(exc).__name__}: {exc}\n")
+                if message.get("id") is not None:
+                    _reply(out, message.get("id"), error={"code": -32603, "message": "Internal error"})
     return 0

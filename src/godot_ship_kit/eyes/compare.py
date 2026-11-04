@@ -103,7 +103,7 @@ def _regions(mask: np.ndarray, cell: int = 24, max_regions: int = 6) -> list[tup
     return [b[1:] for b in boxes[:max_regions]]
 
 
-def compare(reference: Path, current: Path, diff_out: Path | None = None, tolerance: int = 24) -> Diff:
+def compare(reference: Path, current: Path, diff_out: Path | None = None, tolerance: int = 8) -> Diff:
     ref = load_rgb(reference)
     cur = load_rgb(current)
     if ref.shape != cur.shape:

@@ -54,8 +54,8 @@ class EyesConfig:
     output: Path
     threshold: float = 0.99
     max_changed: float = 0.0005
-    tolerance: int = 24
-    region_pixels: int = 40
+    tolerance: int = 8
+    region_pixels: int = 20
     boot_seconds: float = 120.0
 
 
@@ -101,6 +101,67 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_") or "shot"
 
 
+def _num(value: Any, where: str, lo: float, hi: float, integer: bool = False) -> float:
+    """A finite number within [lo, hi] from gsk.toml, or a clear error."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or not lo <= value <= hi:
+        raise EyesConfigError(f"{where} must be a number between {lo:g} and {hi:g}, got {value!r}.")
+    if integer and not float(value).is_integer():
+        raise EyesConfigError(f"{where} must be a whole number, got {value!r}.")
+    return float(value)
+
+
+def _str_list(value: Any, where: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise EyesConfigError(f"{where} must be a list of strings, got {value!r}.")
+    return list(value)
+
+
+def _opt(raw: dict[str, Any], key: str, where: str, lo: float, hi: float, integer: bool = False) -> float | None:
+    return None if key not in raw else _num(raw[key], f"{where} {key}", lo, hi, integer)
+
+
+ACTION_KEYS = {"wait", "tap", "press", "call", "set"}
+
+
+def _actions(value: Any, where: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise EyesConfigError(f"{where} actions must be a list of tables, got {value!r}.")
+    out = []
+    for a in value:
+        if not isinstance(a, dict) or not ACTION_KEYS & set(a):
+            raise EyesConfigError(f"{where}: each action needs one of wait, tap, press, call, set; got {a!r}.")
+        if "wait" in a:
+            _num(a["wait"], f"{where} wait", 0, 600)
+        if "then_wait" in a:
+            _num(a["then_wait"], f"{where} then_wait", 0, 600)
+        if "tap" in a:
+            tap = a["tap"]
+            if not isinstance(tap, list) or len(tap) != 2:
+                raise EyesConfigError(f"{where} tap needs [x, y] as fractions of the screen, got {tap!r}.")
+            for v in tap:
+                _num(v, f"{where} tap", 0, 1)
+        for key in ("press", "call", "set", "node"):
+            if key in a and not isinstance(a[key], str):
+                raise EyesConfigError(f"{where} {key} must be a string, got {a[key]!r}.")
+        if "args" in a and not isinstance(a["args"], list):
+            raise EyesConfigError(f"{where} args must be a list, got {a['args']!r}.")
+        out.append(a)
+    return out
+
+
+def _zooms(value: Any, where: str) -> list[Zoom]:
+    if not isinstance(value, list):
+        raise EyesConfigError(f"{where} zoom must be a list of tables, got {value!r}.")
+    out = []
+    for i, z in enumerate(value):
+        rect = z.get("rect") if isinstance(z, dict) else None
+        if not isinstance(rect, list) or len(rect) != 4:
+            raise EyesConfigError(f"{where} zoom needs rect = [x, y, w, h] as fractions, got {z!r}.")
+        x, y, w, h = (_num(v, f"{where} zoom rect", 0, 1) for v in rect)
+        out.append(Zoom(_slug(str(z.get("name", f"zoom{i + 1}"))), (x, y, w, h)))
+    return out
+
+
 def load_config(
     project: GodotProject,
     config_path: Path | None = None,
@@ -108,42 +169,52 @@ def load_config(
     devices: list[str] | None = None,
 ) -> EyesConfig:
     path = config_path or project.root / "gsk.toml"
-    data: dict[str, Any] = {}
+    data: Any = {}
     if path.is_file():
-        with path.open("rb") as fh:
-            data = tomllib.load(fh).get("eyes", {})
+        try:
+            with path.open("rb") as fh:
+                data = tomllib.load(fh).get("eyes", {})
+        except tomllib.TOMLDecodeError as exc:
+            raise EyesConfigError(f"{path.name}: {exc}") from None
     elif config_path:
         raise EyesConfigError(f"Config file not found: {config_path}")
+    if not isinstance(data, dict):
+        raise EyesConfigError("[eyes] in gsk.toml must be a table.")
 
+    default_wait = _num(data.get("wait", 1.0), "[eyes] wait", 0, 600)
     shots: list[Shot] = []
     if scenes:
         for s in scenes:
             res = s if s.startswith(("res://", "uid://")) else _scene_res(project, s)
-            shots.append(Shot(name=_slug(Path(res.removeprefix("res://")).stem), scene=res, wait=float(data.get("wait", 1.0))))
+            shots.append(Shot(name=_slug(Path(res.removeprefix("res://")).stem), scene=res, wait=default_wait))
     else:
-        for raw in data.get("shot", []):
-            if "scene" not in raw:
-                raise EyesConfigError(f"[[eyes.shot]] entry without 'scene': {raw}")
-            zooms = [
-                Zoom(_slug(z.get("name", f"zoom{i + 1}")), tuple(float(v) for v in z["rect"]))  # type: ignore[arg-type]
-                for i, z in enumerate(raw.get("zoom", []))
-            ]
+        raw_shots = data.get("shot", [])
+        if not isinstance(raw_shots, list):
+            raise EyesConfigError("Shots must be an array of tables: write [[eyes.shot]], not [eyes.shot].")
+        for n, raw in enumerate(raw_shots, 1):
+            where = f"[[eyes.shot]] #{n}"
+            if not isinstance(raw, dict) or not isinstance(raw.get("scene"), str):
+                raise EyesConfigError(f'{where} needs scene = "res://...".')
+            shot_devices = raw.get("devices")
             shots.append(
                 Shot(
-                    name=_slug(raw.get("name") or Path(str(raw["scene"]).removeprefix("res://")).stem),
-                    scene=str(raw["scene"]),
-                    wait=float(raw.get("wait", data.get("wait", 1.0))),
-                    actions=list(raw.get("actions", [])),
-                    zoom=zooms,
-                    devices=raw.get("devices"),
-                    threshold=raw.get("threshold"),
-                    max_changed=raw.get("max_changed"),
-                    region_pixels=raw.get("region_pixels"),
+                    name=_slug(str(raw.get("name") or Path(raw["scene"].removeprefix("res://")).stem)),
+                    scene=raw["scene"],
+                    wait=_num(raw.get("wait", default_wait), f"{where} wait", 0, 600),
+                    actions=_actions(raw.get("actions", []), where),
+                    zoom=_zooms(raw.get("zoom", []), where),
+                    devices=None if shot_devices is None else _str_list(shot_devices, f"{where} devices"),
+                    threshold=_opt(raw, "threshold", where, 0, 1),
+                    max_changed=_opt(raw, "max_changed", where, 0, 1),
+                    region_pixels=None
+                    if "region_pixels" not in raw
+                    else int(_num(raw["region_pixels"], f"{where} region_pixels", 0, 1e9, True)),
                 )
             )
     if not shots:
-        if project.main_scene:
-            shots.append(Shot(name="main", scene=project.main_scene, wait=float(data.get("wait", 2.0))))
+        main = project.main_scene_res
+        if main:
+            shots.append(Shot(name="main", scene=main, wait=_num(data.get("wait", 2.0), "[eyes] wait", 0, 600)))
         else:
             raise EyesConfigError("Nothing to capture: no scenes given, no [[eyes.shot]] in gsk.toml and no main scene.")
     for shot in shots:
@@ -154,7 +225,7 @@ def load_config(
     if dupes:
         raise EyesConfigError(f"Shot names must be unique: {', '.join(sorted(dupes))}")
 
-    devs = devices or data.get("devices") or default_devices(project)
+    devs = devices or (_str_list(data["devices"], "[eyes] devices") if "devices" in data else default_devices(project))
     for d in devs:
         device_size(d)
     return EyesConfig(
@@ -162,9 +233,9 @@ def load_config(
         devices=list(devs),
         references=_inside(project, str(data.get("references", "tests/eyes")), "references"),
         output=_inside(project, str(data.get("output", ".gsk/eyes")), "output"),
-        threshold=float(data.get("threshold", 0.99)),
-        max_changed=float(data.get("max_changed", 0.0005)),
-        tolerance=int(data.get("tolerance", 24)),
-        region_pixels=int(data.get("region_pixels", 40)),
-        boot_seconds=float(data.get("boot_seconds", 120)),
+        threshold=_num(data.get("threshold", 0.99), "[eyes] threshold", 0, 1),
+        max_changed=_num(data.get("max_changed", 0.0005), "[eyes] max_changed", 0, 1),
+        tolerance=int(_num(data.get("tolerance", 8), "[eyes] tolerance", 0, 255, True)),
+        region_pixels=int(_num(data.get("region_pixels", 20), "[eyes] region_pixels", 0, 1e9, True)),
+        boot_seconds=_num(data.get("boot_seconds", 120), "[eyes] boot_seconds", 1, 3600),
     )

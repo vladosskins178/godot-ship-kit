@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -86,4 +87,5 @@ def test_errors_go_to_stderr(example: Path, monkeypatch, capsys) -> None:  # typ
     monkeypatch.setenv("PATH", "/nonexistent")
     assert main(["build", str(example), "--json"]) == 2
     captured = capsys.readouterr()
-    assert captured.out == "" and captured.err.startswith("gsk: Godot not found")
+    assert captured.err.startswith("gsk: Godot not found")
+    assert json.loads(captured.out) == {"ok": False, "error": captured.err.removeprefix("gsk: ").strip()}

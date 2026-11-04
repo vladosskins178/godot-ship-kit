@@ -103,7 +103,7 @@ def test_cli_build_and_verify(example: Path, toolchain, capsys, monkeypatch) -> 
     assert main(["build", str(example), "--debug"]) == 0
     out = capsys.readouterr().out
     assert "Archive integrity OK" in out and "native libraries" in out
-    apk = example / "build" / "hello-ship.apk"
+    apk = example / "build" / "hello-ship-debug.apk"
     assert main(["verify", str(apk), "--json"]) == 0
     capsys.readouterr()
     assert main(["verify", str(apk), "--release"]) == 1  # debug certificate on a release check

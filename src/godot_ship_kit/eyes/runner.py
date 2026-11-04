@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import os
 import re
@@ -44,7 +45,7 @@ class ShotResult:
     shot: str
     device: str
     scene: str
-    status: str  # pass | changed | new | updated | error
+    status: str  # match | changed | new | updated | error
     image: Path | None = None
     reference: Path | None = None
     diff_image: Path | None = None
@@ -62,7 +63,7 @@ class ShotResult:
 
     def to_dict(self, base: Path) -> dict[str, Any]:
         def rel(p: Path | None) -> str | None:
-            return os.path.relpath(p, base) if p else None
+            return str(p.resolve()) if p else None  # absolute, so agents can open them directly
 
         return {
             "shot": self.shot,
@@ -98,7 +99,7 @@ class EyesRun:
         return any(r.failed for r in self.results)
 
     def counts(self) -> dict[str, int]:
-        out = {"pass": 0, "changed": 0, "new": 0, "updated": 0, "error": 0}
+        out = {"match": 0, "changed": 0, "new": 0, "updated": 0, "error": 0}
         for r in self.results:
             out[r.status] = out.get(r.status, 0) + 1
         return out
@@ -247,9 +248,9 @@ def run_device(
     w, h = device_size(device)
     out_dir = cfg.output / device
     out_dir.mkdir(parents=True, exist_ok=True)
-    for s in shots:
-        for ext in (".png", ".json"):
-            (out_dir / f"{s.name}{ext}").unlink(missing_ok=True)
+    for s in shots:  # drop last run's capture, facts, diff and crops for these shots
+        for old in [out_dir / f"{s.name}.png", out_dir / f"{s.name}.json", *out_dir.glob(f"{glob.escape(s.name)}.*.png")]:
+            old.unlink(missing_ok=True)
     budget = cfg.boot_seconds + sum(s.wait + 5 + 2 * len(s.actions) for s in shots) * 3
     script = out_dir / "capture.gd"
     script.write_text(render_capture_script(w, h, out_dir, budget, shots), encoding="utf-8")
@@ -282,7 +283,9 @@ def run_device(
     with log_path.open("w", encoding="utf-8") as fh:
         fh.write("$ " + " ".join(cmd) + "\n\n")
         fh.flush()
-        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, start_new_session=os.name != "nt")
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT, env=env, start_new_session=os.name != "nt"
+        )
         try:
             proc.wait(timeout=budget + 60)
         except subprocess.TimeoutExpired:
@@ -317,7 +320,7 @@ def split_log(text: str) -> tuple[list[str], dict[str, list[str]]]:
         if line.startswith(f"{MARK} END "):
             current = None
             continue
-        if ERROR_LINE.search(line) or (line.startswith(MARK) and "cannot" in line):
+        if ERROR_LINE.search(line) or (line.startswith(MARK) and " ERROR " in line):
             entry = line.strip()
             if i + 1 < len(lines) and lines[i + 1].lstrip().startswith("at:"):
                 entry += "  " + lines[i + 1].strip()
@@ -355,12 +358,18 @@ def analyse_shot(
     if facts.get("idle_skeletons"):
         names = ", ".join(facts["idle_skeletons"][:5])
         res.alerts.append(Alert("warn", f"Rigged model(s) with animations but nothing playing (bind/T-pose): {names}"))
+    if facts.get("overflowing"):
+        res.alerts.append(Alert("warn", f"UI runs off the screen: {'; '.join(facts['overflowing'][:5])}"))
+    for ln in res.log_lines:
+        if ln.startswith(MARK):
+            res.alerts.append(Alert("error", "Capture step failed: " + ln.removeprefix(MARK + " ERROR ")))
     if facts.get("tiny"):
         res.alerts.append(
             Alert("info", f"{len(facts['tiny'])} mesh(es) cover less than 0.01% of the screen: {', '.join(facts['tiny'][:5])}")
         )
-    if res.log_lines:
-        res.alerts.append(Alert("warn", f"{len(res.log_lines)} engine error line(s) while capturing; first: {res.log_lines[0][:200]}"))
+    engine = [ln for ln in res.log_lines if not ln.startswith(MARK)]
+    if engine:
+        res.alerts.append(Alert("warn", f"{len(engine)} engine error line(s) while capturing; first: {engine[0][:200]}"))
 
     for z in shot.zoom:
         res.zooms.append((z.name, cmp.crop(res.image, z.rect, out_dir / f"{res.shot}.zoom-{z.name}.png")))
@@ -368,6 +377,9 @@ def analyse_shot(
     ref = cfg.references / res.device / f"{res.shot}.png"
     res.reference = ref
     if update:
+        if any(a.level == "error" for a in res.alerts):
+            res.status = "error"  # never save a broken capture as the reference
+            return
         _ensure_gdignore(cfg.references)
         ref.parent.mkdir(parents=True, exist_ok=True)
         cmp.save_optimized(res.image, ref)
@@ -390,7 +402,7 @@ def analyse_shot(
         res.status = "changed"
         res.alerts.append(Alert("error", "Screenshot size differs from the reference."))
     elif res.diff.similarity >= threshold and res.diff.changed_ratio <= max_changed and not local:
-        res.status = "pass"
+        res.status = "match"
     else:
         res.status = "changed"
         for i, r in enumerate(res.diff.regions[:3], 1):
@@ -409,6 +421,15 @@ def run(
 ) -> EyesRun:
     started = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
     t0 = time.time()
+    if not (project.root / ".godot" / "imported").is_dir():
+        # A fresh clone has no import cache; without it scenes render with missing textures.
+        sys.stderr.write("  No import cache yet; importing the project once (godot --headless --import)...\n")
+        subprocess.run(
+            [godot.path, "--headless", "--path", str(project.root), "--import"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=3600,
+        )
     _ensure_gdignore(cfg.output)
     gi = cfg.output / ".gitignore"
     if not gi.exists():

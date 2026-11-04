@@ -1,7 +1,7 @@
 # Building a signed AAB in GitHub Actions
 
 This workflow builds a release AAB for your Godot game on every tag, signs it with your
-upload key from repository secrets, verifies it, and attaches it to the run.
+upload key from repository secrets, verifies it, and keeps it as a build artifact.
 
 Add these repository secrets first:
 
@@ -11,8 +11,9 @@ Add these repository secrets first:
 | `UPLOAD_KEYSTORE_ALIAS` | the key alias |
 | `UPLOAD_KEYSTORE_PASSWORD` | the keystore password |
 
-Your export preset must have Gradle build enabled and `gradle_build/export_format` set to
-AAB, and the `android/` build template must be committed (or installed in a step).
+Your export preset needs Gradle build enabled and `gradle_build/export_format` set to AAB.
+Either commit the `android/` build template, or let `--install-template` install it during
+the build (shown below).
 
 ```yaml
 name: Release AAB
@@ -24,9 +25,6 @@ on:
 jobs:
   android:
     runs-on: ubuntu-24.04
-    env:
-      GODOT_VERSION: "4.6.3"
-      GODOT: ${{ github.workspace }}/.godot-bin/godot
     steps:
       - uses: actions/checkout@v4
 
@@ -37,22 +35,13 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - uses: actions/setup-python@v5
+      # Downloads Godot and its export templates (both checked against Godot's
+      # SHA512-SUMS.txt), installs gsk, then runs the command in args.
+      - uses: vladosskins178/godot-ship-kit@v0
         with:
-          python-version: "3.12"
-
-      - name: Install Godot and export templates
-        run: |
-          mkdir -p .godot-bin && cd .godot-bin
-          base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
-          curl -fsSL -o godot.zip "$base/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          unzip -q godot.zip && mv Godot_v${GODOT_VERSION}-stable_linux.x86_64 godot
-          curl -fsSL -o templates.tpz "$base/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          unzip -q templates.tpz && mv templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
-
-      - name: Install gsk
-        run: pip install "godot-ship-kit @ git+https://github.com/vladosskins178/godot-ship-kit"
+          godot-version: "4.6.3"
+          export-templates: "true"
+          args: --version
 
       - name: Point Godot at the SDK and JDK
         run: |
@@ -70,12 +59,14 @@ jobs:
 
       - name: Build and verify
         env:
+          KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
           GODOT_ANDROID_KEYSTORE_RELEASE_USER: ${{ secrets.UPLOAD_KEYSTORE_ALIAS }}
           GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: ${{ secrets.UPLOAD_KEYSTORE_PASSWORD }}
         run: |
-          echo "${{ secrets.UPLOAD_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/upload.keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.keystore"
           export GODOT_ANDROID_KEYSTORE_RELEASE_PATH="$RUNNER_TEMP/upload.keystore"
-          gsk build -o build/game.aab
+          gsk build --install-template -o build/game.aab
+          rm -f "$RUNNER_TEMP/upload.keystore"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -83,7 +74,30 @@ jobs:
           path: build/game.aab
 ```
 
-Add a visual check to pull requests with the same Godot download plus
-`sudo apt-get install -y xvfb libgl1-mesa-dri libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxkbcommon0`,
-then `gsk eyes`. Upload `.gsk/eyes` as
-an artifact so reviewers can open `report.html`.
+Secrets are passed through `env:` rather than written into the script, so they never end
+up in the command line or the rendered workflow. `gsk build` also masks them in its log.
+
+## Visual checks on pull requests
+
+```yaml
+name: Eyes
+
+on: pull_request
+
+jobs:
+  eyes:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vladosskins178/godot-ship-kit@v0
+        with:
+          args: eyes --display xvfb --strict
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eyes-report
+          path: .gsk/eyes
+```
+
+Reviewers download the artifact and open `report.html`. The job fails when a shot changed,
+a reference is missing, or a capture raised an error alert.

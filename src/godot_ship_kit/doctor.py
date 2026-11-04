@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import playreq
+from .build import export_format
 from .env import AndroidToolchain, GodotBinary, android_toolchain, find_godot, java_major, templates_root
 from .godot_cfg import as_list
 from .project import GodotProject, Preset, image_size
@@ -88,6 +89,16 @@ def _check_project(ctx: DoctorContext, _: str | None) -> list[Finding]:
             data={"root": str(p.root)},
         )
     ]
+    if p.config.get("", "config_version") not in (None, 5) or (p.godot_version or "4").startswith("3"):
+        return [
+            F(
+                "project.version",
+                S.ERROR,
+                "This looks like a Godot 3 project",
+                "gsk supports Godot 4 projects (config_version=5 in project.godot).",
+                "Open the project in Godot 4 to convert it (Project > Tools > Upgrade Project Files).",
+            )
+        ]
     if not p.main_scene:
         out.append(
             F(
@@ -246,7 +257,7 @@ def _check_preset(ctx: DoctorContext, preset_name: str | None) -> list[Finding]:
             out.append(F("preset.arch", S.OK, "Architectures: arm64-v8a only"))
 
     gradle = bool(p.opt("gradle_build/use_gradle_build", False))
-    fmt = int(p.opt("gradle_build/export_format", 0) or 0)
+    fmt = export_format(p)
     if fmt == 1 and not gradle:
         out.append(
             F(
@@ -586,6 +597,7 @@ def _git_tracked(root: Path) -> set[str] | None:
     try:
         top = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "-C", str(root), "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=20,
@@ -594,6 +606,7 @@ def _git_tracked(root: Path) -> set[str] | None:
             return None
         files = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "-C", str(root), "ls-files", "--full-name", "-z"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,
@@ -906,7 +919,8 @@ def _check_textures(ctx: DoctorContext, _: str | None) -> list[Finding]:
                 S.WARN,
                 f"{len(heavy)} texture(s) over 1 MB are not VRAM-compressed ({human_bytes(total)} in the export)",
                 "\n".join(f"{e.res_path}  {human_bytes(e.shipped_bytes)}" for e in heavy[:5]) + ("\n..." if len(heavy) > 5 else ""),
-                "Run `gsk slim` to see safe import changes (`gsk slim --apply` writes them, with a backup).",
+                "Run `gsk slim`. VRAM compression (safe tier) cuts GPU memory and load time; the size caps "
+                "and Lossy WebP in the review tier (`--aggressive`) are what shrink the download.",
             )
         )
     big = []

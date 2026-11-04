@@ -33,7 +33,7 @@ def test_eyes_matches_committed_references(real_example: Path, capsys) -> None: 
     code = main(["eyes", str(real_example), "--json", "--display", "xvfb"])
     data = json.loads(capsys.readouterr().out)
     statuses = {r["shot"]: r["status"] for r in data["results"]}
-    assert statuses == {"menu": "pass", "diorama": "pass", "menu-to-game": "pass"}, data
+    assert statuses == {"menu": "match", "diorama": "match", "menu-to-game": "match"}, data
     assert code == 0
     assert Path(data["reports"]["html"]).is_file()
 
@@ -75,5 +75,28 @@ def test_capture_script_parses_under_strict_warnings(real_example: Path, capsys)
         fh.write(strict)
     code = main(["eyes", str(real_example), "--json", "--display", "xvfb", "--scene", "res://scenes/diorama.tscn"])
     data = json.loads(capsys.readouterr().out)
-    assert data["results"][0]["status"] == "pass", data
+    assert data["results"][0]["status"] == "match", data
     assert code == 0
+
+
+@needs_godot
+def test_failed_actions_are_errors_and_not_saved(real_example: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    (real_example / "gsk.toml").write_text(
+        '[eyes]\ndevices = ["phone-small"]\nreferences = "refs"\n'
+        '[[eyes.shot]]\nname = "bad"\nscene = "res://scenes/menu.tscn"\n'
+        'actions = [{ press = "ui_acept" }, { node = "Nope", call = "x" }]\n'
+    )
+    code = main(["eyes", str(real_example), "--json", "--display", "xvfb", "--update"])
+    res = json.loads(capsys.readouterr().out)["results"][0]
+    assert code == 1 and res["status"] == "error"
+    assert sum("Capture step failed" in a["message"] for a in res["alerts"]) == 2
+    assert not (real_example / "refs" / "phone-small" / "bad.png").exists()
+
+
+@needs_godot
+def test_overflowing_ui_is_reported(real_example: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    menu = real_example / "scenes" / "menu.tscn"
+    menu.write_text(menu.read_text().replace("font_size = 84", "font_size = 120"))
+    main(["eyes", str(real_example), "--json", "--display", "xvfb", "--scene", "res://scenes/menu.tscn"])
+    res = json.loads(capsys.readouterr().out)["results"][0]
+    assert any("runs off the screen" in a["message"] for a in res["alerts"]), res["alerts"]

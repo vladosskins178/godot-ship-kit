@@ -7,7 +7,7 @@ branding:
 
 inputs:
   args:
-    description: Arguments for gsk, for example "eyes path/to/game" or "doctor --strict".
+    description: Arguments for gsk, for example "eyes path/to/game" or "doctor --strict". Quote paths with spaces.
     required: true
   godot-version:
     description: Godot release to download (the "-stable" build).
@@ -66,7 +66,5 @@ runs:
       shell: bash
       env:
         GSK_ARGS: ${{ inputs.args }}
-      run: |
-        # Word-split the arguments on purpose (paths with spaces need quoting in "args").
-        # shellcheck disable=SC2086
-        gsk $GSK_ARGS
+      # Split like a shell would (quotes respected, no globbing or variable expansion).
+      run: python -c 'import os, shlex; os.execvp("gsk", ["gsk", *shlex.split(os.environ["GSK_ARGS"])])'

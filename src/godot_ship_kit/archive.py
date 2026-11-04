@@ -188,6 +188,7 @@ def inspect(
         _verify_apk(rep, toolchain, expect_release)
     else:
         _verify_aab(rep, toolchain)
+        _verify_aab_signature(rep, toolchain, expect_release)
     return rep
 
 
@@ -223,12 +224,25 @@ def _check_page_size(rep: ArchiveReport, path: Path, infos: list[zipfile.ZipInfo
     if not libs:
         return
     bad: list[str] = []
+    unreadable: list[str] = []
     with zipfile.ZipFile(path) as zf:
         for info in libs:
             with zf.open(info) as fh:
                 align = elf_load_alignment(fh.read(64 * 1024))
-            if align is not None and align < 0x4000:
+            if align is None:
+                unreadable.append(info.filename)
+            elif align < 0x4000:
                 bad.append(f"{info.filename} (aligned to {align // 1024} KB)")
+    if unreadable:
+        rep.findings.append(
+            F(
+                "archive.page_size",
+                S.WARN,
+                f"Could not read the ELF headers of {len(unreadable)} native librar{'y' if len(unreadable) == 1 else 'ies'}",
+                "\n".join(unreadable[:6]) + "\n16 KB page support is unknown for these.",
+                docs=playreq.PAGE_16K_URL,
+            )
+        )
     if bad:
         rep.findings.append(
             F(
@@ -241,13 +255,13 @@ def _check_page_size(rep: ArchiveReport, path: Path, infos: list[zipfile.ZipInfo
                 playreq.PAGE_16K_URL,
             )
         )
-    else:
+    elif not unreadable:
         rep.findings.append(F("archive.page_size", S.OK, f"{len(libs)} 64-bit native libraries support 16 KB pages"))
 
 
 def _run(cmd: list[str], timeout: int = 300, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -377,6 +391,41 @@ def _bundletool() -> list[str] | None:
     return None
 
 
+def _verify_aab_signature(rep: ArchiveReport, tc: AndroidToolchain | None, expect_release: bool | None) -> None:
+    """AABs are JAR-signed; jarsigner (part of the JDK) checks it. bundletool validate does not."""
+    jarsigner = None
+    if tc and tc.jdk and (tc.jdk / "bin" / "jarsigner").is_file():
+        jarsigner = str(tc.jdk / "bin" / "jarsigner")
+    jarsigner = jarsigner or shutil.which("jarsigner")
+    if not jarsigner:
+        rep.findings.append(F("archive.signature", S.INFO, "jarsigner not found; AAB signature not checked", fix="Install a JDK."))
+        return
+    res = _run([jarsigner, "-verify", "-verbose", "-certs", str(rep.path.resolve())], timeout=600)
+    out = (res.stdout + res.stderr) if res else ""
+    if not res or "jar verified." not in out:
+        tail = "\n".join([ln for ln in out.strip().splitlines() if ln.strip()][-3:]) or "jarsigner did not run"
+        unsigned = "jar is unsigned" in out
+        rep.findings.append(
+            F(
+                "archive.signature",
+                S.ERROR if expect_release or not unsigned else S.WARN,
+                "AAB is not signed" if unsigned else "AAB signature does not verify",
+                tail,
+                "Play needs the AAB signed with your upload key.",
+            )
+        )
+        return
+    m = re.search(r"X\.509, ([^\n]+)", out)
+    dn = m.group(1).strip() if m else "?"
+    debug_cert = "Android Debug" in dn
+    sev = S.ERROR if expect_release and debug_cert else S.INFO if debug_cert else S.OK
+    note = "\nSigned with the debug certificate." if debug_cert else ""
+    rep.findings.append(F("archive.signature", sev, "AAB signature verified (jarsigner)", f"Signer: {dn}{note}"))
+    rep.manifest["signer"] = dn
+    if expect_release and rep.manifest.get("debuggable"):
+        rep.findings.append(F("archive.debuggable", S.ERROR, "Release build is marked debuggable", fix="Export with --export-release."))
+
+
 def _verify_aab(rep: ArchiveReport, tc: AndroidToolchain | None) -> None:
     bt = _bundletool()
     if not bt:
@@ -415,4 +464,6 @@ def _verify_aab(rep: ArchiveReport, tc: AndroidToolchain | None) -> None:
             rep.manifest["min_sdk"] = int(mn.group(1))
         if perms:
             rep.manifest["permissions"] = sorted({p.removeprefix("android.permission.") for p in perms})
+        if re.search(r'android:debuggable="(true|-1)"', res.stdout):
+            rep.manifest["debuggable"] = True
         _target_finding(rep)

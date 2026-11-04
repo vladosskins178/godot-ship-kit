@@ -166,7 +166,7 @@ def test_analyse_shot_alerts_and_statuses(tmp_path: Path, example: Path) -> None
 
     res = ShotResult("menu", "phone", shot.scene, "error", image=img)
     analyse_shot(res, cfg, shot, update=False)
-    assert res.status == "pass" and not res.failed
+    assert res.status == "match" and not res.failed
 
     changed = _scene(tmp_path / "menu2.png", box=(20, 20, 120, 120))
     res = ShotResult("menu", "phone", shot.scene, "error", image=changed)
@@ -182,7 +182,7 @@ def test_analyse_shot_alerts_and_statuses(tmp_path: Path, example: Path) -> None
 
 def test_reports(tmp_path: Path, example: Path) -> None:
     img = _scene(tmp_path / "a.png")
-    ok = ShotResult("menu", "phone", "res://scenes/menu.tscn", "pass", image=img, reference=img, diff=cmp.Diff(1.0, 0.0, 0))
+    ok = ShotResult("menu", "phone", "res://scenes/menu.tscn", "match", image=img, reference=img, diff=cmp.Diff(1.0, 0.0, 0))
     new = ShotResult("game<script>", "phone", "res://g.tscn", "new", image=img)
     run = _run(tmp_path, example, [ok, new])
     html = render_html(run)

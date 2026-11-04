@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Vladislav Y" }]
 keywords = ["godot", "godot4", "android", "google-play", "gamedev", "aab", "apk", "visual-regression", "agent-skills", "claude-code"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
