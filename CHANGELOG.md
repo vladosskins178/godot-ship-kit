@@ -15,8 +15,10 @@ First public release.
   references by SSIM, changed-pixel share and largest connected change; diff images,
   changed-region and zoom crops; scene alerts (black or flat frame, meshes without
   materials, no camera, nothing in view, idle rigs, engine errors); HTML, Markdown and
-  JSON reports; `--update` to save references. The capture script is generated as typed
-  GDScript, works on Godot 4.2 to 4.6 and in projects with strict warning settings.
+  JSON reports; `--update` to save references (tagged with the Godot version), `--strict`
+  for CI, automatic import of a fresh checkout. The capture script is generated as typed
+  GDScript and works on Godot 4.2 to 4.6 and in projects with strict warning settings.
+  Alerts also cover UI that runs off the screen and failed shot actions.
 - `gsk doctor`: around 40 checks across toolchain (Godot, export templates including .NET,
   Android SDK, JDK 17, Gradle build template), export preset (package name, version,
   architectures, APK/AAB, target and min SDK from the template in use, permissions,

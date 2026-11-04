@@ -228,3 +228,18 @@ def test_render_capture_script(tmp_path: Path) -> None:
     assert "@@" not in text
     with pytest.raises(EyesError):
         render_capture_script(720, 1600, tmp_path, 60, [Shot("x", "res://x.tscn", actions=[{"jump": 1}])])
+
+
+def test_error_alert_without_reference_is_an_error(tmp_path: Path, example: Path) -> None:
+    cfg = load_config(GodotProject.open(example))
+    cfg.output, cfg.references = tmp_path / "out", tmp_path / "refs"
+    black = tmp_path / "black.png"
+    Image.new("RGB", (200, 400)).save(black)
+    res = ShotResult("menu", "phone", "res://scenes/menu.tscn", "error", image=black)
+    analyse_shot(res, cfg, Shot("menu", "res://scenes/menu.tscn"), update=False)
+    assert res.status == "error" and res.reference is None
+
+
+def test_device_size_bounds() -> None:
+    with pytest.raises(EyesConfigError, match="out of range"):
+        device_size("99999x99999")

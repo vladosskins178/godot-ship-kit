@@ -64,7 +64,10 @@ def device_size(name: str) -> tuple[int, int]:
         return DEVICES[name]
     m = re.fullmatch(r"(\d{2,5})x(\d{2,5})", name)
     if m:
-        return int(m.group(1)), int(m.group(2))
+        w, h = int(m.group(1)), int(m.group(2))
+        if not (64 <= w <= 8192 and 64 <= h <= 8192):
+            raise EyesConfigError(f"Device size {name} is out of range (64 to 8192 px per side).")
+        return w, h
     raise EyesConfigError(f"Unknown device '{name}'. Use one of {', '.join(DEVICES)} or WIDTHxHEIGHT.")
 
 

@@ -78,6 +78,9 @@ def cmd_slim(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _fail(str(exc), EXIT_FAIL)
         if not restored:
+            names = [b.name for b in slim.list_backups(project)]
+            if args.undo and names:
+                return _fail(f"backup {args.undo!r} not found. Available: {', '.join(names)}", EXIT_FAIL)
             return _fail("nothing to undo: no gsk slim backups found.", EXIT_FAIL)
         code, info = _maybe_reimport(project, args)
         if args.json:
@@ -87,6 +90,8 @@ def cmd_slim(args: argparse.Namespace) -> int:
             _print_reimport(info, out)
         return code
 
+    if min(args.max_3d, args.max_2d) < 16 or args.top < 1:
+        return _fail("--max-3d / --max-2d must be at least 16 px and --top at least 1.")
     report = slim.analyze(project, max_3d=args.max_3d, max_2d=args.max_2d, top=args.top)
     chosen = [p for p in report.proposals if p.risk == slim.SAFE or args.aggressive]
 
@@ -238,6 +243,8 @@ def _print_archive(rep: object, out: TextIO, verbose: bool) -> None:
         out.write("\n")
         for key, val in rows:
             out.write(f"  {style.dim(f'{key:<12}')} {val}\n")
+    if not rep.categories:
+        return
     out.write("\n" + style.bold("  What is inside (compressed)") + "\n")
     for cat, size in sorted(rep.categories.items(), key=lambda kv: -kv[1]):
         out.write(f"    {human_bytes(size):>10}  {cat}\n")
@@ -335,6 +342,8 @@ def cmd_eyes(args: argparse.Namespace) -> int:
     if args.output:
         cfg.output = Path(args.output).resolve()
     if args.threshold is not None:
+        if not 0 <= args.threshold <= 1:
+            return _fail("--threshold must be between 0 and 1.")
         cfg.threshold = args.threshold
     if not args.json:
         n = sum(1 for d in cfg.devices for s in cfg.shots if s.devices is None or d in s.devices)
@@ -401,7 +410,12 @@ def cmd_checklist(args: argparse.Namespace) -> int:
     project = _open_project(args.project)
     text = build_checklist(project)
     if args.output:
-        Path(args.output).write_text(text, encoding="utf-8")
+        out_path = Path(args.output)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            return _fail(f"cannot write {out_path}: {exc.strerror or exc}")
         _out().write(f"Wrote {args.output}\n")
     else:
         _out().write(text)

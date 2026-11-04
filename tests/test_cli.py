@@ -89,3 +89,10 @@ def test_errors_go_to_stderr(example: Path, monkeypatch, capsys) -> None:  # typ
     captured = capsys.readouterr()
     assert captured.err.startswith("gsk: Godot not found")
     assert json.loads(captured.out) == {"ok": False, "error": captured.err.removeprefix("gsk: ").strip()}
+
+
+def test_cli_argument_checks(example: Path, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["slim", str(example), "--max-3d", "-5"]) == 2
+    out = tmp_path / "new" / "dir" / "PLAY.md"
+    assert main(["play-checklist", str(example), "-o", str(out)]) == 0 and out.is_file()
+    assert main(["slim", str(example), "--undo", "nope"]) == 1

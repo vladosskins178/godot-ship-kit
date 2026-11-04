@@ -142,7 +142,8 @@ Full reference: [docs/eyes.md](docs/eyes.md).
 Software rendering is deterministic, which is what makes reference images work: the
 sample project renders identical captures run after run, on the author's machine and in
 a fresh Ubuntu 24.04 container with the official Godot download. References belong to a Godot
-version (text rasterisation changes between releases), so regenerate them when you
+version (text rasterisation changes between releases): gsk records the version in
+`godot-version.txt` next to them and says so when it differs, so regenerate them when you
 upgrade. Software rendering shows layout, colour, composition and missing assets; it
 does not show real-device performance. CI runs the capture script on Godot 4.2, 4.4, 4.5
 and 4.6, and against a project that treats untyped or unsafe GDScript as errors.
@@ -282,8 +283,8 @@ on a headless server. The two work fine side by side.
 
 ## CI
 
-The repository is also a GitHub Action. It downloads Godot (checksum verified), installs
-gsk and the software-rendering packages, and runs a gsk command:
+The repository is also a GitHub Action (Linux runners). It downloads Godot (checksum
+verified), installs gsk and the software-rendering packages, and runs a gsk command:
 
 ```yaml
 - uses: vladosskins178/godot-ship-kit@v0

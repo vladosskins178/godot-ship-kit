@@ -47,7 +47,7 @@ packages = ["src/godot_ship_kit"]
 "skills/godot-ship-kit/SKILL.md" = "godot_ship_kit/skill/SKILL.md"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "skills", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md", "AGENTS.md"]
+include = ["src", "skills", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md", "AGENTS.md", "AUDIT.md"]
 
 [tool.ruff]
 line-length = 140

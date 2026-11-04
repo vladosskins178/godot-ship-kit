@@ -919,8 +919,8 @@ def _check_textures(ctx: DoctorContext, _: str | None) -> list[Finding]:
                 S.WARN,
                 f"{len(heavy)} texture(s) over 1 MB are not VRAM-compressed ({human_bytes(total)} in the export)",
                 "\n".join(f"{e.res_path}  {human_bytes(e.shipped_bytes)}" for e in heavy[:5]) + ("\n..." if len(heavy) > 5 else ""),
-                "Run `gsk slim`. VRAM compression (safe tier) cuts GPU memory and load time; the size caps "
-                "and Lossy WebP in the review tier (`--aggressive`) are what shrink the download.",
+                "Run `gsk slim`. The safe tier (VRAM compression) cuts GPU memory and load time;\n"
+                "the review tier (`--aggressive`: size caps, Lossy WebP) shrinks the download.",
             )
         )
     big = []

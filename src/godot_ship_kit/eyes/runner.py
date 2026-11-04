@@ -376,10 +376,12 @@ def analyse_shot(
 
     ref = cfg.references / res.device / f"{res.shot}.png"
     res.reference = ref
+    if any(a.level == "error" for a in res.alerts):
+        res.status = "error"  # a broken capture is never compared, and never saved as a reference
+        if not ref.is_file():
+            res.reference = None
+        return
     if update:
-        if any(a.level == "error" for a in res.alerts):
-            res.status = "error"  # never save a broken capture as the reference
-            return
         _ensure_gdignore(cfg.references)
         ref.parent.mkdir(parents=True, exist_ok=True)
         cmp.save_optimized(res.image, ref)
@@ -468,4 +470,28 @@ def run(
                     res.facts = {}
             analyse_shot(res, cfg, s, update)
             results.append(res)
+    _note_godot_version(cfg, godot, results, update)
     return EyesRun(project, cfg, godot, results, method, started, time.time() - t0, update)
+
+
+def _note_godot_version(cfg: EyesConfig, godot: GodotBinary, results: list[ShotResult], update: bool) -> None:
+    """References record the Godot version that made them; text rendering changes between releases."""
+    marker = cfg.references / "godot-version.txt"
+    if update:
+        if any(r.status == "updated" for r in results):
+            marker.write_text(godot.short + "\n", encoding="utf-8")
+        return
+    try:
+        made_with = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if made_with and made_with != godot.short:
+        for r in results:
+            if r.status == "changed":
+                r.alerts.append(
+                    Alert(
+                        "info",
+                        f"References were made with Godot {made_with}, this run used {godot.short}; "
+                        "text and antialiasing differ between releases. Check the crops, then --update.",
+                    )
+                )

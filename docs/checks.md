@@ -7,6 +7,7 @@ will probably hurt you (rejection, crash on some phones, a much bigger download)
 | Id | Looks at | Severity when it fires |
 | --- | --- | --- |
 | `project` | project name, Godot version and features | - |
+| `project.version` | the project is a Godot 4 project (`config_version=5`) | error |
 | `project.main_scene` | a main scene is set and exists | error |
 | `godot.binary` | Godot 4 binary from `--godot`, `$GODOT` or PATH | error |
 | `godot.version` | binary minor version matches `config/features` | warn |
@@ -52,6 +53,7 @@ will probably hurt you (rejection, crash on some phones, a much bigger download)
 
 | Id | Looks at | Severity when it fires |
 | --- | --- | --- |
+| `archive.exists` | the file to verify was produced | error |
 | `archive.zip` | zip structure and CRC of every entry | error |
 | `archive.arm64` | `arm64-v8a` native code present | error |
 | `archive.size` | APK size, or the AAB base module (500 MB) and each asset pack (1.5 GB), plus the 200 MB mobile-data warning | error / warn |

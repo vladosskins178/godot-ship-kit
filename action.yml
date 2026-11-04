@@ -1,5 +1,5 @@
 name: godot-ship-kit
-description: Install Godot and gsk, then run a gsk command (doctor, slim, build, eyes, ...) on a Godot 4 project.
+description: Install Godot and gsk, then run a gsk command (doctor, slim, build, eyes, ...) on a Godot 4 project. Linux runners.
 author: Vladislav Y
 branding:
   icon: smartphone
@@ -22,6 +22,11 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Check the runner
+      if: runner.os != 'Linux'
+      shell: bash
+      run: echo "godot-ship-kit's action supports Linux runners only." >&2; exit 1
+
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
