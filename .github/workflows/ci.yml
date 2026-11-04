@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      - run: pytest -m "not godot"
+
+  godot:
+    name: End-to-end with Godot ${{ matrix.godot }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        godot: ["4.6.3"]
+    env:
+      GODOT: ${{ github.workspace }}/.godot-bin/godot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install xvfb and Mesa (software OpenGL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri libglx-mesa0 \
+            libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 libxkbcommon0 libxrender1 libfontconfig1
+      - name: Download Godot ${{ matrix.godot }}
+        run: |
+          mkdir -p .godot-bin && cd .godot-bin
+          curl -fsSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${{ matrix.godot }}-stable/Godot_v${{ matrix.godot }}-stable_linux.x86_64.zip"
+          unzip -q godot.zip && mv Godot_v${{ matrix.godot }}-stable_linux.x86_64 godot && chmod +x godot
+          ./godot --headless --version
+      - run: pip install -e ".[dev]"
+      - name: Import the sample project
+        run: $GODOT --headless --path examples/hello-ship --import
+      - name: gsk doctor (no Android SDK on this runner, so errors are expected)
+        run: gsk doctor examples/hello-ship --verbose || true
+      - name: gsk slim
+        run: gsk slim examples/hello-ship
+      - name: gsk play-checklist
+        run: gsk play-checklist examples/hello-ship > /dev/null
+      - name: gsk eyes against the committed references
+        run: gsk eyes examples/hello-ship --display xvfb
+      - name: End-to-end tests
+        run: pytest -m godot
+      - name: Upload the eyes report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eyes-report-godot-${{ matrix.godot }}
+          path: examples/hello-ship/.gsk/eyes

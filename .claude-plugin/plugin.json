@@ -1,0 +1,10 @@
+{
+  "name": "godot-ship-kit",
+  "version": "0.1.0",
+  "description": "Ship Godot 4 games to Android and Google Play: doctor, slim, build, Play checklist, and headless phone screenshots your agent can read.",
+  "author": { "name": "Vladislav Y", "url": "https://github.com/vladosskins178" },
+  "homepage": "https://github.com/vladosskins178/godot-ship-kit",
+  "repository": "https://github.com/vladosskins178/godot-ship-kit",
+  "license": "MIT",
+  "keywords": ["godot", "android", "google-play", "gamedev", "visual-testing"]
+}

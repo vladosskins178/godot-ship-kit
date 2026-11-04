@@ -1,0 +1,23 @@
+# gsk configuration for the sample project.
+
+[eyes]
+devices = ["phone-small"]          # 720x1600; add "phone", "tablet", ... as needed
+references = "tests/eyes"      # committed golden screenshots (gsk adds a .gdignore)
+threshold = 0.985              # minimum similarity (SSIM) to count as a match
+max_changed = 0.003            # at most 0.3% of pixels may change
+
+[[eyes.shot]]
+name = "menu"
+scene = "res://scenes/menu.tscn"
+wait = 1.0
+zoom = [{ name = "title", rect = [0.1, 0.25, 0.8, 0.25] }]
+
+[[eyes.shot]]
+name = "diorama"
+scene = "res://scenes/diorama.tscn"
+wait = 1.5
+
+[[eyes.shot]]
+name = "menu-to-game"
+scene = "res://scenes/menu.tscn"
+actions = [{ press = "ui_accept" }, { wait = 1.0 }]

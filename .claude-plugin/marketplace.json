@@ -1,0 +1,11 @@
+{
+  "name": "godot-ship-kit",
+  "owner": { "name": "Vladislav Y", "url": "https://github.com/vladosskins178" },
+  "plugins": [
+    {
+      "name": "godot-ship-kit",
+      "source": "./",
+      "description": "Ship Godot 4 games to Android and Google Play, with headless phone screenshots for visual checks."
+    }
+  ]
+}

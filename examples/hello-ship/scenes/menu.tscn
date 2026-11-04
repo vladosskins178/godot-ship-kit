@@ -1,0 +1,147 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://scenes/menu.gd" id="1_menu"]
+[ext_resource type="Texture2D" path="res://art/backdrop.jpg" id="2_bg"]
+[ext_resource type="Texture2D" path="res://art/icon.svg" id="3_icon"]
+
+[sub_resource type="StyleBoxFlat" id="panel"]
+bg_color = Color(0.09, 0.06, 0.16, 0.72)
+corner_radius_top_left = 36
+corner_radius_top_right = 36
+corner_radius_bottom_right = 36
+corner_radius_bottom_left = 36
+content_margin_left = 48.0
+content_margin_top = 48.0
+content_margin_right = 48.0
+content_margin_bottom = 48.0
+shadow_color = Color(0, 0, 0, 0.35)
+shadow_size = 24
+
+[sub_resource type="StyleBoxFlat" id="primary"]
+bg_color = Color(0.984, 0.761, 0.267, 1)
+corner_radius_top_left = 24
+corner_radius_top_right = 24
+corner_radius_bottom_right = 24
+corner_radius_bottom_left = 24
+content_margin_top = 22.0
+content_margin_bottom = 22.0
+
+[sub_resource type="StyleBoxEmpty" id="no_focus"]
+
+[sub_resource type="StyleBoxFlat" id="secondary"]
+bg_color = Color(1, 1, 1, 0.08)
+border_width_left = 3
+border_width_top = 3
+border_width_right = 3
+border_width_bottom = 3
+border_color = Color(1, 1, 1, 0.35)
+corner_radius_top_left = 24
+corner_radius_top_right = 24
+corner_radius_bottom_right = 24
+corner_radius_bottom_left = 24
+content_margin_top = 20.0
+content_margin_bottom = 20.0
+
+[node name="Menu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_menu")
+
+[node name="Backdrop" type="TextureRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+texture = ExtResource("2_bg")
+expand_mode = 1
+stretch_mode = 6
+
+[node name="Center" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_bottom = -120.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Card" type="PanelContainer" parent="Center"]
+custom_minimum_size = Vector2(600, 0)
+layout_mode = 2
+theme_override_styles/panel = SubResource("panel")
+
+[node name="Panel" type="VBoxContainer" parent="Center/Card"]
+layout_mode = 2
+theme_override_constants/separation = 28
+
+[node name="Logo" type="TextureRect" parent="Center/Card/Panel"]
+custom_minimum_size = Vector2(0, 168)
+layout_mode = 2
+texture = ExtResource("3_icon")
+expand_mode = 1
+stretch_mode = 5
+
+[node name="Title" type="Label" parent="Center/Card/Panel"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.96, 0.88, 1)
+theme_override_colors/font_outline_color = Color(0.16, 0.08, 0.24, 1)
+theme_override_constants/outline_size = 18
+theme_override_font_sizes/font_size = 84
+text = "Hello, Ship!"
+horizontal_alignment = 1
+
+[node name="Tagline" type="Label" parent="Center/Card/Panel"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.93, 0.85, 0.85)
+theme_override_font_sizes/font_size = 30
+text = "A tiny game, ready for the Play Store."
+horizontal_alignment = 1
+autowrap_mode = 3
+
+[node name="Buttons" type="VBoxContainer" parent="Center/Card/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 20
+
+[node name="Play" type="Button" parent="Center/Card/Panel/Buttons"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.17, 0.1, 0.25, 1)
+theme_override_colors/font_hover_color = Color(0.17, 0.1, 0.25, 1)
+theme_override_colors/font_pressed_color = Color(0.17, 0.1, 0.25, 1)
+theme_override_font_sizes/font_size = 40
+theme_override_styles/normal = SubResource("primary")
+theme_override_styles/hover = SubResource("primary")
+theme_override_styles/pressed = SubResource("primary")
+theme_override_styles/focus = SubResource("no_focus")
+text = "Play"
+
+[node name="Settings" type="Button" parent="Center/Card/Panel/Buttons"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.96, 0.9, 1)
+theme_override_font_sizes/font_size = 34
+theme_override_styles/normal = SubResource("secondary")
+theme_override_styles/hover = SubResource("secondary")
+text = "Settings"
+
+[node name="Version" type="Label" parent="."]
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -200.0
+offset_top = -90.0
+offset_right = 200.0
+offset_bottom = -50.0
+grow_horizontal = 2
+grow_vertical = 0
+theme_override_colors/font_color = Color(1, 0.95, 0.9, 0.7)
+theme_override_font_sizes/font_size = 24
+text = "v1.0.0"
+horizontal_alignment = 1
